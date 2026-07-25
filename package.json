@@ -5,20 +5,28 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "start": "node server/example_server.js",
+    "test": "jest --runInBand"
   },
   "dependencies": {
     "react": "*",
     "react-dom": "*",
     "react-router-dom": "*",
     "@supabase/supabase-js": "*",
-    "vite-plugin-pwa": "*"
+    "vite-plugin-pwa": "*",
+    "express": "*",
+    "pg": "*",
+    "dotenv": "*",
+    "body-parser": "*"
   },
   "devDependencies": {
     "vite": "*",
     "@vitejs/plugin-react": "*",
     "tailwindcss": "*",
     "postcss": "*",
-    "autoprefixer": "*"
+    "autoprefixer": "*",
+    "jest": "*",
+    "supertest": "*"
   }
 }

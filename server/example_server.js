@@ -38,6 +38,58 @@ app.use((req, res, next) => {
   next();
 });
 
+// Basic validation helpers (lightweight, keep dependencies small)
+function validateFamilyPayload(body) {
+  const errors = [];
+  if (!body || typeof body.name !== 'string' || body.name.trim() === '') errors.push('name is required');
+  return { ok: errors.length === 0, errors };
+}
+
+function validateJoinPayload(body) {
+  const errors = [];
+  if (!body || typeof body.invite_code !== 'string' || body.invite_code.trim() === '') errors.push('invite_code is required');
+  if (!body || typeof body.user_id !== 'string' || body.user_id.trim() === '') errors.push('user_id is required');
+  return { ok: errors.length === 0, errors };
+}
+
+function validateEventCreatePayload(body) {
+  const errors = [];
+  if (!body) {
+    errors.push('body is required');
+    return { ok: false, errors };
+  }
+  if (!body.family_id || typeof body.family_id !== 'string') errors.push('family_id is required');
+  if (!body.title || typeof body.title !== 'string') errors.push('title is required');
+  if (!body.start_time) errors.push('start_time is required');
+  if (!body.end_time) errors.push('end_time is required');
+  // simple time ordering check if both provided
+  if (body.start_time && body.end_time) {
+    const s = new Date(body.start_time);
+    const e = new Date(body.end_time);
+    if (!(s instanceof Date) || isNaN(s)) errors.push('start_time must be a valid date');
+    if (!(e instanceof Date) || isNaN(e)) errors.push('end_time must be a valid date');
+    if (s >= e) errors.push('start_time must be before end_time');
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+function validateEventUpdatePayload(body) {
+  if (!body) return { ok: false, errors: ['body is required'] };
+  const allowed = ['title','description','location','start_time','end_time','all_day','assigned_member_ids'];
+  const keys = Object.keys(body);
+  if (keys.length === 0) return { ok: false, errors: ['nothing to update'] };
+  const invalid = keys.filter(k => !allowed.includes(k));
+  if (invalid.length) return { ok: false, errors: [`invalid fields: ${invalid.join(',')}`] };
+  if (body.start_time && body.end_time) {
+    const s = new Date(body.start_time);
+    const e = new Date(body.end_time);
+    if (!(s instanceof Date) || isNaN(s)) return { ok: false, errors:['start_time must be a valid date'] };
+    if (!(e instanceof Date) || isNaN(e)) return { ok: false, errors:['end_time must be a valid date'] };
+    if (s >= e) return { ok: false, errors:['start_time must be before end_time'] };
+  }
+  return { ok: true, errors: [] };
+}
+
 // Helper: run callback in a client where app.current_user_id is set for the session
 async function withCurrentUser(clientCallback, currentUserId) {
   const client = await pool.connect();
@@ -292,5 +344,11 @@ app.delete('/events/:id', async (req, res) => {
   }
 });
 
-const port = process.env.PORT || 4000;
-app.listen(port, () => console.log(`Example server listening on port ${port}`));
+// Export app for testing; only start server when run directly
+module.exports = { app, pool, withCurrentUser };
+
+if (require.main === module) {
+  const port = process.env.PORT || 4000;
+  app.listen(port, () => console.log(`Example server listening on port ${port}`));
+}
+
