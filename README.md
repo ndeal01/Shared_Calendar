@@ -22,6 +22,11 @@ Next steps (run locally):
    psql $DATABASE_URL -f db/schema_postgres.sql
    psql $DATABASE_URL -f db/seed_demo.sql   # optional demo data
 
+   For the Supabase-backed normalized schema run:
+
+   psql $DATABASE_URL -f db/schema_normalized.sql
+   psql $DATABASE_URL -f db/supabase_schema.sql  # if you want the shared-state table as well
+
 6. Start the example server (demo of setting app.current_user_id):
 
    cd server

@@ -10,6 +10,20 @@ function formatDateKey(date) {
   return `${year}-${month}-${day}`;
 }
 
+function getWeekDates(referenceDate) {
+  const start = new Date(referenceDate);
+  const day = start.getDay();
+  const diff = (day + 6) % 7;
+  start.setDate(start.getDate() - diff);
+  start.setHours(0, 0, 0, 0);
+
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(start);
+    date.setDate(start.getDate() + index);
+    return date;
+  });
+}
+
 function ProtectedRoute({ children }) {
   const { user } = useApp();
   return user ? children : <Navigate to="/login" replace />;
@@ -53,6 +67,7 @@ function AppShell({ children }) {
         <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-2 px-4 py-3 lg:px-6">
           {[
             ['/', 'Calendar'],
+            ['/week/today', 'Week'],
             ['/day/today', 'Today'],
             ['/members', 'Members'],
             ['/settings', 'Settings']
@@ -74,10 +89,14 @@ function AppShell({ children }) {
 }
 
 function LoginPage() {
-  const { login } = useApp();
+  const { user, login } = useApp();
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [displayName, setDisplayName] = useState('');
+
+  if (user) {
+    return <Navigate to="/" replace />;
+  }
 
   const handleSubmit = (event) => {
     event.preventDefault();
@@ -117,9 +136,13 @@ function LoginPage() {
 }
 
 function JoinPage() {
-  const { joinFamily } = useApp();
+  const { user, joinFamily } = useApp();
   const [inviteCode, setInviteCode] = useState('');
   const navigate = useNavigate();
+
+  if (user) {
+    return <Navigate to="/" replace />;
+  }
 
   const handleSubmit = (event) => {
     event.preventDefault();
@@ -134,7 +157,7 @@ function JoinPage() {
       <form onSubmit={handleSubmit} className="mt-6 space-y-4">
         <label className="block text-sm font-medium text-slate-700">
           Invite code
-          <input value={inviteCode} onChange={(event) => setInviteCode(event.target.value)} className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-2 outline-none ring-0" placeholder="SMITH123" />
+          <input value={inviteCode} onChange={(event) => setInviteCode(event.target.value)} className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-2 outline-none ring-0" placeholder="FAMILY123" />
         </label>
         <button type="submit" className="w-full rounded-2xl bg-teal-600 px-4 py-3 font-semibold text-white">
           Join family
@@ -145,12 +168,13 @@ function JoinPage() {
 }
 
 function HomePage() {
-  const { events, currentMonth, setCurrentMonth } = useApp();
+  const { events, members, currentMonth, setCurrentMonth, addMember } = useApp();
 
   const monthStart = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1);
   const monthDays = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0).getDate();
   const firstDay = (monthStart.getDay() + 6) % 7;
   const cells = [];
+  const todayKey = formatDateKey(new Date());
 
   for (let index = 0; index < firstDay; index += 1) cells.push(null);
   for (let day = 1; day <= monthDays; day += 1) cells.push(new Date(currentMonth.getFullYear(), currentMonth.getMonth(), day));
@@ -160,31 +184,90 @@ function HomePage() {
     return (dateKey) => events.filter((event) => event.date === dateKey);
   }, [events]);
 
+  const upcomingEvents = useMemo(() => {
+    return [...events]
+      .filter((event) => event.date >= todayKey)
+      .sort((left, right) => {
+        if (left.date === right.date) {
+          return (left.startTime || '').localeCompare(right.startTime || '');
+        }
+
+        return left.date.localeCompare(right.date);
+      })
+      .slice(0, 3);
+  }, [events, todayKey]);
+
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-        <button onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1))} className="rounded-full border border-slate-200 px-3 py-2 text-sm font-medium">
+      {members.length === 0 && events.length === 0 ? (
+        <div className="rounded-[1.5rem] border border-slate-200 bg-white p-6 shadow-sm text-center">
+          <h2 className="text-2xl font-semibold">Start your first family calendar</h2>
+          <p className="mt-2 text-sm text-slate-600">Add family members and schedule your first event — everything will sync across devices if Supabase is configured.</p>
+          <div className="mt-4 flex flex-wrap justify-center gap-3">
+            <button onClick={() => {
+              const name = prompt('Member name');
+              if (name) addMember(name, '#3b82f6');
+            }} className="rounded-full bg-teal-600 px-4 py-2 text-white font-semibold">Add a family member</button>
+            <button onClick={() => window.location.href = '/event/new'} className="rounded-full border border-slate-200 px-4 py-2 font-semibold text-slate-700">Create an event</button>
+          </div>
+        </div>
+      ) : (
+        <div className="rounded-[1.5rem] border border-slate-200 bg-gradient-to-br from-teal-600 to-cyan-600 p-4 text-white shadow-sm sm:p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-teal-100">Today at a glance</p>
+            <h3 className="mt-1 text-lg font-semibold">{upcomingEvents.length > 0 ? 'Upcoming family plans' : 'Your calendar is clear'}</h3>
+          </div>
+          <button onClick={() => setCurrentMonth(new Date())} className="rounded-full border border-white/30 bg-white/15 px-3 py-2 text-sm font-medium text-white transition hover:bg-white/25">
+            Jump to today
+          </button>
+        </div>
+        <div className="mt-4 space-y-2">
+          {upcomingEvents.length > 0 ? (
+            upcomingEvents.map((event) => (
+              <div key={event.id} className="rounded-2xl border border-white/20 bg-white/10 px-3 py-2 backdrop-blur-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold">{event.title}</p>
+                    <p className="text-sm text-teal-50/90">{formatDateLabel(event.date)}{event.allDay ? '' : ` • ${event.startTime || '--'}`}</p>
+                  </div>
+                  <Link to={`/day/${event.date}`} className="text-sm font-semibold text-white/90 hover:text-white">
+                    View
+                  </Link>
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="rounded-2xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-teal-50/90">
+              Nothing is scheduled from today onward yet.
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-[1.5rem] border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+        <button onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1))} className="rounded-full border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:border-teal-500 hover:text-teal-700">
           ← Prev
         </button>
         <div className="text-center">
-          <p className="text-sm font-semibold uppercase tracking-[0.3em] text-slate-500">Month view</p>
-          <h2 className="text-xl font-semibold">{formatMonthLabel(currentMonth)}</h2>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">Month view</p>
+          <h2 className="text-lg font-semibold sm:text-xl">{formatMonthLabel(currentMonth)}</h2>
         </div>
-        <button onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1))} className="rounded-full border border-slate-200 px-3 py-2 text-sm font-medium">
+        <button onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1))} className="rounded-full border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:border-teal-500 hover:text-teal-700">
           Next →
         </button>
       </div>
 
-      <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="mb-3 grid grid-cols-7 gap-2 text-center text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
+      <div className="rounded-[1.5rem] border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
+        <div className="mb-2 grid grid-cols-7 gap-1 text-center text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500 sm:mb-3 sm:gap-2 sm:text-xs">
           {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((label) => (
             <div key={label}>{label}</div>
           ))}
         </div>
-        <div className="grid grid-cols-7 gap-2">
+        <div className="grid grid-cols-7 gap-1 sm:gap-2">
           {cells.map((date, index) => {
             if (!date) {
-              return <div key={`empty-${index}`} className="h-24 rounded-2xl border border-transparent bg-slate-50" />;
+              return <div key={`empty-${index}`} className="aspect-square rounded-2xl border border-transparent bg-slate-50/80" />;
             }
 
             const dateKey = formatDateKey(date);
@@ -192,14 +275,26 @@ function HomePage() {
             const matchingEvents = dayEvents(dateKey);
 
             return (
-              <Link key={dateKey} to={`/day/${dateKey}`} className={`flex h-24 flex-col rounded-2xl border p-2 text-left ${isToday ? 'border-teal-500 bg-teal-50' : 'border-slate-200 bg-white'}`}>
-                <span className={`text-sm font-semibold ${isToday ? 'text-teal-700' : 'text-slate-700'}`}>{date.getDate()}</span>
-                <div className="mt-2 space-y-1 overflow-hidden text-[11px] text-slate-600">
+              <Link
+                key={dateKey}
+                to={`/day/${dateKey}`}
+                className={`group flex aspect-square flex-col rounded-2xl border p-1.5 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md sm:p-2 ${isToday ? 'border-teal-500 bg-gradient-to-br from-teal-50 to-white' : 'border-slate-200 bg-white'}`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className={`text-[11px] font-semibold sm:text-sm ${isToday ? 'text-teal-700' : 'text-slate-700'}`}>{date.getDate()}</span>
+                  {matchingEvents.length > 0 && (
+                    <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-600 sm:text-[10px]">{matchingEvents.length}</span>
+                  )}
+                </div>
+                <div className="mt-1 flex-1 space-y-1 overflow-hidden">
                   {matchingEvents.slice(0, 2).map((event) => (
-                    <div key={event.id} className="truncate rounded bg-slate-100 px-2 py-1">
+                    <div key={event.id} className="truncate rounded-lg bg-slate-100 px-1.5 py-1 text-[9px] font-medium text-slate-700 sm:text-[10px]">
                       {event.title}
                     </div>
                   ))}
+                  {matchingEvents.length > 2 && (
+                    <div className="text-[9px] font-semibold text-slate-500 sm:text-[10px]">+{matchingEvents.length - 2} more</div>
+                  )}
                 </div>
               </Link>
             );
@@ -210,11 +305,82 @@ function HomePage() {
   );
 }
 
+function WeekPage() {
+  const { dateKey } = useParams();
+  const { events } = useApp();
+  const navigate = useNavigate();
+  const resolvedDate = dateKey === 'today' ? new Date() : new Date(`${dateKey}T12:00:00`);
+  const weekDates = getWeekDates(resolvedDate);
+  const weekLabel = `${formatDateLabel(formatDateKey(weekDates[0]))} – ${formatDateLabel(formatDateKey(weekDates[6]))}`;
+
+  const goToPreviousWeek = () => {
+    const nextDate = new Date(resolvedDate);
+    nextDate.setDate(nextDate.getDate() - 7);
+    navigate(`/week/${formatDateKey(nextDate)}`);
+  };
+
+  const goToNextWeek = () => {
+    const nextDate = new Date(resolvedDate);
+    nextDate.setDate(nextDate.getDate() + 7);
+    navigate(`/week/${formatDateKey(nextDate)}`);
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex items-center gap-2">
+          <button onClick={goToPreviousWeek} className="rounded-full border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700">← Prev</button>
+          <button onClick={() => navigate('/week/today')} className="rounded-full border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700">Today</button>
+          <button onClick={goToNextWeek} className="rounded-full border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700">Next →</button>
+        </div>
+        <div>
+          <p className="text-sm font-semibold uppercase tracking-[0.3em] text-slate-500">Week view</p>
+          <h2 className="text-xl font-semibold">{weekLabel}</h2>
+        </div>
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-7">
+        {weekDates.map((date) => {
+          const dateKey = formatDateKey(date);
+          const matchingEvents = events.filter((event) => event.date === dateKey);
+          const isToday = dateKey === formatDateKey(new Date());
+
+          return (
+            <Link key={dateKey} to={`/day/${dateKey}`} className={`rounded-[1.5rem] border p-3 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${isToday ? 'border-teal-500 bg-teal-50' : 'border-slate-200 bg-white'}`}>
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">{new Intl.DateTimeFormat('en', { weekday: 'short' }).format(date)}</p>
+                  <h3 className={`mt-1 text-lg font-semibold ${isToday ? 'text-teal-700' : 'text-slate-900'}`}>{date.getDate()}</h3>
+                </div>
+                {matchingEvents.length > 0 && <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-600">{matchingEvents.length}</span>}
+              </div>
+              <div className="mt-3 space-y-2">
+                {matchingEvents.length === 0 ? (
+                  <div className="rounded-xl bg-white/60 px-2 py-2 text-xs text-slate-500">No events</div>
+                ) : (
+                  matchingEvents.slice(0, 3).map((event) => (
+                    <div key={event.id} className="rounded-xl bg-slate-100 px-2 py-2 text-xs text-slate-700">
+                      <p className="font-semibold">{event.title}</p>
+                      <p className="mt-1 text-[11px] text-slate-500">{event.allDay ? 'All day' : event.startTime || '--'}</p>
+                    </div>
+                  ))
+                )}
+              </div>
+            </Link>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function DayPage() {
   const { dateKey } = useParams();
-  const { events, members } = useApp();
+  const { events, members, deleteEvent } = useApp();
   const resolvedDateKey = dateKey === 'today' ? formatDateKey(new Date()) : dateKey;
+  const [activeMemberId, setActiveMemberId] = useState('all');
   const dayEvents = events.filter((event) => event.date === resolvedDateKey);
+  const filteredEvents = dayEvents.filter((event) => activeMemberId === 'all' || event.assignedMemberIds.includes(activeMemberId));
   const dateLabel = formatDateLabel(resolvedDateKey);
 
   return (
@@ -230,13 +396,27 @@ function DayPage() {
       </div>
 
       <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-4 flex flex-wrap gap-2">
+          <button type="button" onClick={() => setActiveMemberId('all')} className={`rounded-full px-3 py-2 text-sm font-medium ${activeMemberId === 'all' ? 'bg-teal-600 text-white' : 'border border-slate-200 text-slate-700'}`}>
+            All members
+          </button>
+          {members.map((member) => (
+            <button key={member.id} type="button" onClick={() => setActiveMemberId(member.id)} className={`rounded-full px-3 py-2 text-sm font-medium ${activeMemberId === member.id ? 'text-white' : 'border border-slate-200 text-slate-700'}`} style={activeMemberId === member.id ? { backgroundColor: member.color } : {}}>
+              {member.name}
+            </button>
+          ))}
+        </div>
         {dayEvents.length === 0 ? (
           <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-600">
             No events yet for this day. Tap add event to create one.
           </div>
+        ) : filteredEvents.length === 0 ? (
+          <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-600">
+            No events for this member on this day.
+          </div>
         ) : (
           <div className="space-y-3">
-            {dayEvents.map((event) => {
+            {filteredEvents.map((event) => {
               const assignedMembers = members.filter((member) => event.assignedMemberIds.includes(member.id));
               return (
                 <div key={event.id} className="rounded-2xl border border-slate-200 p-4">
@@ -247,6 +427,17 @@ function DayPage() {
                     </div>
                     <div className="flex gap-2">
                       <Link to={`/event/${event.id}/edit`} className="rounded-full border border-slate-200 px-3 py-1 text-sm font-medium">Edit</Link>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (window.confirm(`Delete \"${event.title}\"?`)) {
+                            deleteEvent(event.id);
+                          }
+                        }}
+                        className="rounded-full border border-rose-200 px-3 py-1 text-sm font-medium text-rose-600"
+                      >
+                        Delete
+                      </button>
                     </div>
                   </div>
                   {(event.location || event.notes) && (
@@ -488,6 +679,7 @@ export default function App() {
         <Route path="/login" element={<LoginPage />} />
         <Route path="/join" element={<JoinPage />} />
         <Route path="/" element={<ProtectedRoute><HomePage /></ProtectedRoute>} />
+        <Route path="/week/:dateKey" element={<ProtectedRoute><WeekPage /></ProtectedRoute>} />
         <Route path="/day/:dateKey" element={<ProtectedRoute><DayPage /></ProtectedRoute>} />
         <Route path="/event/new" element={<ProtectedRoute><EventFormPage /></ProtectedRoute>} />
         <Route path="/event/:eventId/edit" element={<ProtectedRoute><EventFormPage /></ProtectedRoute>} />
