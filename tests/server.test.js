@@ -38,8 +38,11 @@ describe('Validation and basic event CRUD behavior (mocked DB)', () => {
     jest.resetAllMocks();
   });
 
-  test('POST /events returns 400 when required fields missing', async () => {
-    const res = await request(app).post('/events').send({});
+  test('POST /events returns 400 when required fields missing (authenticated)', async () => {
+    const res = await request(app)
+      .post('/events')
+      .query({ as_user: '11111111-1111-1111-1111-111111111111' })
+      .send({});
     expect(res.status).toBe(400);
     expect(res.body).toHaveProperty('error');
   });
