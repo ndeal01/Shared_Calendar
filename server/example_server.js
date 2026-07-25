@@ -136,5 +136,161 @@ app.get('/events', async (req, res) => {
   }
 });
 
+// Get single event by id
+app.get('/events/:id', async (req, res) => {
+  const userId = req.currentUserId;
+  const eventId = req.params.id;
+  if (!userId) return res.status(401).json({ error: 'Missing demo user id' });
+
+  try {
+    const event = await withCurrentUser(async (client) => {
+      const q = await client.query('SELECT e.* FROM events e WHERE e.id = $1', [eventId]);
+      if (q.rowCount === 0) return null;
+      const membersQ = await client.query('SELECT em.member_id FROM event_members em WHERE em.event_id = $1', [eventId]);
+      const row = q.rows[0];
+      row.assigned_member_ids = membersQ.rows.map(r => r.member_id);
+      return row;
+    }, userId);
+
+    if (!event) return res.status(404).json({ error: 'Not found or access denied' });
+    res.json(event);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Create event
+app.post('/events', async (req, res) => {
+  const userId = req.currentUserId;
+  const {
+    family_id,
+    title,
+    description,
+    location,
+    start_time,
+    end_time,
+    all_day = false,
+    assigned_member_ids = []
+  } = req.body;
+
+  if (!userId) return res.status(401).json({ error: 'Missing demo user id' });
+  if (!family_id || !title || !start_time || !end_time) return res.status(400).json({ error: 'family_id, title, start_time, end_time required' });
+
+  try {
+    const created = await withCurrentUser(async (client) => {
+      // Find the member id for the creator within this family
+      const mem = await client.query('SELECT id FROM members WHERE family_id = $1 AND user_id = $2 LIMIT 1', [family_id, userId]);
+      const created_by = mem.rowCount ? mem.rows[0].id : null;
+
+      const insert = await client.query(
+        `INSERT INTO events (family_id, title, description, location, start_time, end_time, all_day, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         RETURNING *`,
+        [family_id, title, description || null, location || null, start_time, end_time, all_day, created_by]
+      );
+
+      const eventId = insert.rows[0].id;
+
+      // Insert event_members
+      for (const memberId of assigned_member_ids) {
+        await client.query('INSERT INTO event_members (event_id, member_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [eventId, memberId]);
+      }
+
+      const membersQ = await client.query('SELECT member_id FROM event_members WHERE event_id = $1', [eventId]);
+      const result = insert.rows[0];
+      result.assigned_member_ids = membersQ.rows.map(r => r.member_id);
+      return result;
+    }, userId);
+
+    res.status(201).json(created);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Update event
+app.put('/events/:id', async (req, res) => {
+  const userId = req.currentUserId;
+  const eventId = req.params.id;
+  const {
+    title,
+    description,
+    location,
+    start_time,
+    end_time,
+    all_day,
+    assigned_member_ids
+  } = req.body;
+
+  if (!userId) return res.status(401).json({ error: 'Missing demo user id' });
+
+  try {
+    const updated = await withCurrentUser(async (client) => {
+      // Build dynamic update
+      const fields = [];
+      const vals = [];
+      let idx = 1;
+      if (title !== undefined) { fields.push(`title = $${idx++}`); vals.push(title); }
+      if (description !== undefined) { fields.push(`description = $${idx++}`); vals.push(description); }
+      if (location !== undefined) { fields.push(`location = $${idx++}`); vals.push(location); }
+      if (start_time !== undefined) { fields.push(`start_time = $${idx++}`); vals.push(start_time); }
+      if (end_time !== undefined) { fields.push(`end_time = $${idx++}`); vals.push(end_time); }
+      if (all_day !== undefined) { fields.push(`all_day = $${idx++}`); vals.push(all_day); }
+      if (fields.length === 0 && assigned_member_ids === undefined) throw new Error('Nothing to update');
+
+      if (fields.length > 0) {
+        // add updated_at
+        fields.push(`updated_at = now()`);
+        const q = `UPDATE events SET ${fields.join(', ')} WHERE id = $${idx} RETURNING *`;
+        vals.push(eventId);
+        const r = await client.query(q, vals);
+        if (r.rowCount === 0) throw new Error('Not found or access denied');
+      }
+
+      if (assigned_member_ids !== undefined) {
+        // Replace assignments: simple strategy delete existing and insert new
+        await client.query('DELETE FROM event_members WHERE event_id = $1', [eventId]);
+        for (const memberId of assigned_member_ids) {
+          await client.query('INSERT INTO event_members (event_id, member_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [eventId, memberId]);
+        }
+      }
+
+      const final = await client.query('SELECT * FROM events WHERE id = $1', [eventId]);
+      if (final.rowCount === 0) throw new Error('Not found or access denied');
+      const membersQ = await client.query('SELECT member_id FROM event_members WHERE event_id = $1', [eventId]);
+      const row = final.rows[0];
+      row.assigned_member_ids = membersQ.rows.map(r => r.member_id);
+      return row;
+    }, userId);
+
+    res.json(updated);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Delete event
+app.delete('/events/:id', async (req, res) => {
+  const userId = req.currentUserId;
+  const eventId = req.params.id;
+  if (!userId) return res.status(401).json({ error: 'Missing demo user id' });
+
+  try {
+    const deleted = await withCurrentUser(async (client) => {
+      const r = await client.query('DELETE FROM events WHERE id = $1 RETURNING id', [eventId]);
+      return r.rowCount > 0;
+    }, userId);
+
+    if (!deleted) return res.status(404).json({ error: 'Not found or access denied' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 const port = process.env.PORT || 4000;
 app.listen(port, () => console.log(`Example server listening on port ${port}`));
