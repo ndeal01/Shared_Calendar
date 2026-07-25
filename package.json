@@ -10,23 +10,24 @@
     "test": "jest --runInBand"
   },
   "dependencies": {
+    "@supabase/supabase-js": "*",
+    "body-parser": "*",
+    "dotenv": "*",
+    "express": "*",
+    "pg": "*",
     "react": "*",
     "react-dom": "*",
     "react-router-dom": "*",
-    "@supabase/supabase-js": "*",
-    "vite-plugin-pwa": "*",
-    "express": "*",
-    "pg": "*",
-    "dotenv": "*",
-    "body-parser": "*"
+    "vite-plugin-pwa": "*"
   },
   "devDependencies": {
-    "vite": "*",
+    "@tailwindcss/postcss": "^4.3.3",
     "@vitejs/plugin-react": "*",
-    "tailwindcss": "*",
-    "postcss": "*",
     "autoprefixer": "*",
     "jest": "*",
-    "supertest": "*"
+    "postcss": "*",
+    "supertest": "*",
+    "tailwindcss": "*",
+    "vite": "*"
   }
 }
