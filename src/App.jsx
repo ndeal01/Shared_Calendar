@@ -5,6 +5,7 @@ import { useToast } from './context/ToastContext';
 import { formatDateLabel, formatMonthLabel } from './data/sampleData';
 import { hasSupabaseConfig } from './supabaseClient';
 import { WEEKDAY_LABELS, getEventOccurrences, eventOccursOnDate } from './utils/recurrence';
+import ErrorBoundary from './components/ErrorBoundary';
 
 function formatDateKey(date) {
   const year = date.getFullYear();
@@ -321,7 +322,130 @@ function LoginPage() {
         <button type="submit" disabled={submitting} className="w-full rounded-2xl bg-teal-600 px-4 py-3 font-semibold text-white disabled:opacity-60">
           {submitting ? 'Please wait…' : mode === 'signup' ? 'Create account' : 'Continue'}
         </button>
+        {mode === 'signin' && hasSupabaseConfig && (
+          <Link to="/forgot-password" className="block text-center text-sm font-medium text-teal-700 hover:underline">
+            Forgot your password?
+          </Link>
+        )}
       </form>
+    </div>
+  );
+}
+
+function ForgotPasswordPage() {
+  const { requestPasswordReset } = useApp();
+  const [email, setEmail] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const [sent, setSent] = useState(false);
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    if (!email.trim()) return;
+
+    setError('');
+    setSubmitting(true);
+    const { error } = await requestPasswordReset(email.trim());
+    setSubmitting(false);
+
+    if (error) {
+      setError(error.message || 'Something went wrong');
+      return;
+    }
+
+    setSent(true);
+  };
+
+  return (
+    <div className="mx-auto max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+      <p className="text-sm font-semibold uppercase tracking-[0.3em] text-teal-600">Reset password</p>
+      <h2 className="mt-2 text-2xl font-semibold">Forgot your password?</h2>
+      <p className="mt-2 text-sm text-slate-600">Enter your email and we'll send you a link to reset your password.</p>
+
+      {sent ? (
+        <div className="mt-6 rounded-2xl bg-teal-50 px-3 py-3 text-sm font-medium text-teal-700">
+          Check your email for a password reset link.
+        </div>
+      ) : (
+        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+          <label className="block text-sm font-medium text-slate-700">
+            Email
+            <input value={email} onChange={(event) => setEmail(event.target.value)} type="email" className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-2 outline-none ring-0" placeholder="you@example.com" />
+          </label>
+          {error && <p className="rounded-2xl bg-red-50 px-3 py-2 text-sm font-medium text-red-700">{error}</p>}
+          <button type="submit" disabled={submitting} className="w-full rounded-2xl bg-teal-600 px-4 py-3 font-semibold text-white disabled:opacity-60">
+            {submitting ? 'Sending…' : 'Send reset link'}
+          </button>
+        </form>
+      )}
+
+      <Link to="/login" className="mt-4 block text-center text-sm font-medium text-teal-700 hover:underline">
+        Back to sign in
+      </Link>
+    </div>
+  );
+}
+
+function ResetPasswordPage() {
+  const { updatePassword } = useApp();
+  const navigate = useNavigate();
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState(false);
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+
+    if (password.length < 6) {
+      setError('Password must be at least 6 characters.');
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError('Passwords do not match.');
+      return;
+    }
+
+    setError('');
+    setSubmitting(true);
+    const { error } = await updatePassword(password);
+    setSubmitting(false);
+
+    if (error) {
+      setError(error.message || 'Something went wrong');
+      return;
+    }
+
+    setDone(true);
+    setTimeout(() => navigate('/'), 1500);
+  };
+
+  return (
+    <div className="mx-auto max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+      <p className="text-sm font-semibold uppercase tracking-[0.3em] text-teal-600">Reset password</p>
+      <h2 className="mt-2 text-2xl font-semibold">Choose a new password</h2>
+
+      {done ? (
+        <div className="mt-6 rounded-2xl bg-teal-50 px-3 py-3 text-sm font-medium text-teal-700">
+          Password updated! Taking you to your calendar…
+        </div>
+      ) : (
+        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+          <label className="block text-sm font-medium text-slate-700">
+            New password
+            <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" minLength={6} className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-2 outline-none ring-0" placeholder="••••••••" />
+          </label>
+          <label className="block text-sm font-medium text-slate-700">
+            Confirm new password
+            <input value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} type="password" minLength={6} className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-2 outline-none ring-0" placeholder="••••••••" />
+          </label>
+          {error && <p className="rounded-2xl bg-red-50 px-3 py-2 text-sm font-medium text-red-700">{error}</p>}
+          <button type="submit" disabled={submitting} className="w-full rounded-2xl bg-teal-600 px-4 py-3 font-semibold text-white disabled:opacity-60">
+            {submitting ? 'Saving…' : 'Update password'}
+          </button>
+        </form>
+      )}
     </div>
   );
 }
@@ -789,7 +913,10 @@ function EventFormPage() {
     recurrenceFreq: existingEvent?.recurrenceFreq || 'none',
     recurrenceInterval: existingEvent?.recurrenceInterval || 1,
     recurrenceDaysOfWeek: existingEvent?.recurrenceDaysOfWeek || [],
-    recurrenceEndDate: existingEvent?.recurrenceEndDate || ''
+    recurrenceEndDate: existingEvent?.recurrenceEndDate || '',
+    reminderMinutesBefore: existingEvent
+      ? existingEvent.reminderMinutesBefore ?? ''
+      : 30
   });
 
   const handleChange = (event) => {
@@ -858,7 +985,8 @@ function EventFormPage() {
       recurrenceFreq: form.recurrenceFreq,
       recurrenceInterval: recurrenceInterval || 1,
       recurrenceDaysOfWeek: form.recurrenceFreq === 'weekly' ? form.recurrenceDaysOfWeek : [],
-      recurrenceEndDate: form.recurrenceEndDate || null
+      recurrenceEndDate: form.recurrenceEndDate || null,
+      reminderMinutesBefore: form.reminderMinutesBefore === '' ? null : Number(form.reminderMinutesBefore)
     };
 
     setSaving(true);
@@ -934,6 +1062,24 @@ function EventFormPage() {
           <input name="isTask" type="checkbox" checked={form.isTask} onChange={handleChange} />
           Make this a to-do item (can be checked off when done)
         </label>
+
+        {!form.allDay && (
+          <label className="block text-sm font-medium text-slate-700">
+            Remind me
+            <select name="reminderMinutesBefore" value={form.reminderMinutesBefore} onChange={handleChange} className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-2">
+              <option value="">No reminder</option>
+              <option value="0">At start time</option>
+              <option value="5">5 minutes before</option>
+              <option value="10">10 minutes before</option>
+              <option value="15">15 minutes before</option>
+              <option value="20">20 minutes before</option>
+              <option value="25">25 minutes before</option>
+              <option value="30">30 minutes before</option>
+              <option value="45">45 minutes before</option>
+              <option value="60">1 hour before</option>
+            </select>
+          </label>
+        )}
 
         <div className="rounded-2xl border border-slate-200 p-4">
           <p className="text-sm font-medium text-slate-700">Repeats</p>
@@ -1204,18 +1350,22 @@ function SettingsPage() {
 
 export default function App() {
   return (
-    <AppShell>
-      <Routes>
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/onboarding" element={<OnboardingRoute><OnboardingPage /></OnboardingRoute>} />
-        <Route path="/" element={<ProtectedRoute><HomePage /></ProtectedRoute>} />
-        <Route path="/week/:dateKey" element={<ProtectedRoute><WeekPage /></ProtectedRoute>} />
-        <Route path="/day/:dateKey" element={<ProtectedRoute><DayPage /></ProtectedRoute>} />
-        <Route path="/event/new" element={<ProtectedRoute><EventFormPage /></ProtectedRoute>} />
-        <Route path="/event/:eventId/edit" element={<ProtectedRoute><EventFormPage /></ProtectedRoute>} />
-        <Route path="/members" element={<ProtectedRoute><MembersPage /></ProtectedRoute>} />
-        <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
-      </Routes>
-    </AppShell>
+    <ErrorBoundary>
+      <AppShell>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+          <Route path="/reset-password" element={<ResetPasswordPage />} />
+          <Route path="/onboarding" element={<OnboardingRoute><OnboardingPage /></OnboardingRoute>} />
+          <Route path="/" element={<ProtectedRoute><HomePage /></ProtectedRoute>} />
+          <Route path="/week/:dateKey" element={<ProtectedRoute><WeekPage /></ProtectedRoute>} />
+          <Route path="/day/:dateKey" element={<ProtectedRoute><DayPage /></ProtectedRoute>} />
+          <Route path="/event/new" element={<ProtectedRoute><EventFormPage /></ProtectedRoute>} />
+          <Route path="/event/:eventId/edit" element={<ProtectedRoute><EventFormPage /></ProtectedRoute>} />
+          <Route path="/members" element={<ProtectedRoute><MembersPage /></ProtectedRoute>} />
+          <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
+        </Routes>
+      </AppShell>
+    </ErrorBoundary>
   );
 }

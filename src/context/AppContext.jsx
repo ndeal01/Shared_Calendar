@@ -1,6 +1,8 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { sampleEvents, sampleFamily, sampleMembers } from '../data/sampleData';
 import { hasSupabaseConfig, supabase } from '../supabaseClient';
+import { useToast } from './ToastContext';
+import { getEventOccurrences } from '../utils/recurrence';
 
 const AppContext = createContext({});
 
@@ -81,11 +83,14 @@ function normalizeEventRow(eventRow, assignments) {
     recurrenceInterval: eventRow.recurrence_interval || 1,
     recurrenceDaysOfWeek: eventRow.recurrence_days_of_week || null,
     recurrenceEndDate: eventRow.recurrence_end_date || null,
+    reminderMinutesBefore: eventRow.reminder_minutes_before ?? null,
     assignedMemberIds: assignments.filter((a) => a.event_id === eventRow.id).map((a) => a.member_id)
   };
 }
 
 export function AppProvider({ children }) {
+  const toast = useToast();
+
   // Local/demo auth (used only when Supabase is not configured).
   const [localUser, setLocalUser] = useState(() => readFromStorage(STORAGE_KEYS.user, null));
 
@@ -265,6 +270,77 @@ export function AppProvider({ children }) {
     };
   }, [user?.id]);
 
+  // --- Reminder notifications ---
+  // Polls every 60s for upcoming occurrences the current user should be
+  // reminded about (no push/cron server, so this only fires while a tab is
+  // open). Dedupes locally per-session and relies on a partial unique index
+  // on notifications(user_id, event_id, occurrence_date) where type='reminder'
+  // server-side so re-checks/reloads never create duplicate rows.
+  const remindedKeysRef = useRef(new Set());
+
+  useEffect(() => {
+    if (!hasSupabaseConfig || !supabase || !user?.id || !family?.id) return undefined;
+
+    const checkReminders = async () => {
+      const now = new Date();
+      const todayKey = createDateKey(now);
+      const tomorrow = new Date(now);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      const tomorrowKey = createDateKey(tomorrow);
+
+      for (const eventItem of events) {
+        if (eventItem.reminderMinutesBefore == null || eventItem.allDay || !eventItem.startTime) continue;
+
+        // Notify if the signed-in user is one of the assigned members, or the
+        // event has no specific assignments (family-wide).
+        const assignedMemberIds = eventItem.assignedMemberIds || [];
+        const isAssignedToMe = assignedMemberIds.some((memberId) => {
+          const member = members.find((m) => m.id === memberId);
+          return member?.user_id === user.id;
+        });
+        if (assignedMemberIds.length > 0 && !isAssignedToMe) continue;
+
+        const occurrenceDates = getEventOccurrences(eventItem, todayKey, tomorrowKey);
+
+        for (const occurrenceDateKey of occurrenceDates) {
+          const startAt = new Date(`${occurrenceDateKey}T${eventItem.startTime}:00`);
+          const reminderAt = new Date(startAt.getTime() - eventItem.reminderMinutesBefore * 60 * 1000);
+
+          if (now < reminderAt || now >= startAt) continue;
+
+          const dedupeKey = `${eventItem.id}|${occurrenceDateKey}`;
+          if (remindedKeysRef.current.has(dedupeKey)) continue;
+          remindedKeysRef.current.add(dedupeKey);
+
+          const message =
+            eventItem.reminderMinutesBefore === 0
+              ? `"${eventItem.title}" is starting now`
+              : `"${eventItem.title}" starts in ${eventItem.reminderMinutesBefore} minutes`;
+
+          const { error: upsertError } = await supabase
+            .from('notifications')
+            .upsert(
+              [{
+                family_id: family.id,
+                user_id: user.id,
+                event_id: eventItem.id,
+                occurrence_date: occurrenceDateKey,
+                message,
+                type: 'reminder'
+              }],
+              { onConflict: 'user_id,event_id,occurrence_date', ignoreDuplicates: true }
+            );
+
+          if (!upsertError) toast(message);
+        }
+      }
+    };
+
+    checkReminders();
+    const intervalId = setInterval(checkReminders, 60 * 1000);
+    return () => clearInterval(intervalId);
+  }, [user?.id, family?.id, events, members, toast]);
+
   useEffect(() => {
     if (hasSupabaseConfig) return;
     writeToStorage(STORAGE_KEYS.user, localUser);
@@ -340,6 +416,25 @@ export function AppProvider({ children }) {
 
     setSession(data.session);
     return { error: null };
+  };
+
+  // Send a password-reset email; the link redirects back to /reset-password
+  // where updatePassword() below sets the new password.
+  const requestPasswordReset = async (email) => {
+    if (!hasSupabaseConfig || !supabase) return { error: new Error('Password reset requires Supabase') };
+
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: typeof window !== 'undefined' ? `${window.location.origin}/reset-password` : undefined
+    });
+
+    return { error: error || null };
+  };
+
+  const updatePassword = async (newPassword) => {
+    if (!hasSupabaseConfig || !supabase) return { error: new Error('Password update requires Supabase') };
+
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    return { error: error || null };
   };
 
   const logout = async () => {
@@ -479,6 +574,7 @@ export function AppProvider({ children }) {
       recurrenceInterval: 1,
       recurrenceDaysOfWeek: null,
       recurrenceEndDate: null,
+      reminderMinutesBefore: 30,
       ...eventInput,
       assignedMemberIds: eventInput.assignedMemberIds || []
     };
@@ -499,7 +595,8 @@ export function AppProvider({ children }) {
           recurrence_freq: newEvent.recurrenceFreq || 'none',
           recurrence_interval: newEvent.recurrenceInterval || 1,
           recurrence_days_of_week: newEvent.recurrenceFreq === 'weekly' ? newEvent.recurrenceDaysOfWeek : null,
-          recurrence_end_date: newEvent.recurrenceEndDate || null
+          recurrence_end_date: newEvent.recurrenceEndDate || null,
+          reminder_minutes_before: newEvent.reminderMinutesBefore ?? null
         }]);
 
         if (insertError) return { error: insertError };
@@ -536,7 +633,8 @@ export function AppProvider({ children }) {
           recurrence_freq: updates.recurrenceFreq || 'none',
           recurrence_interval: updates.recurrenceInterval || 1,
           recurrence_days_of_week: updates.recurrenceFreq === 'weekly' ? updates.recurrenceDaysOfWeek : null,
-          recurrence_end_date: updates.recurrenceEndDate || null
+          recurrence_end_date: updates.recurrenceEndDate || null,
+          reminder_minutes_before: updates.reminderMinutesBefore ?? null
         }).eq('id', eventId);
 
         if (updateError) return { error: updateError };
@@ -740,6 +838,8 @@ export function AppProvider({ children }) {
       signIn,
       login,
       logout,
+      requestPasswordReset,
+      updatePassword,
       createFamily,
       joinFamily,
       leaveFamily,

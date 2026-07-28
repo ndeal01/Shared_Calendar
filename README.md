@@ -27,6 +27,7 @@ Next steps (run locally):
    psql $DATABASE_URL -f db/schema_normalized.sql
    psql $DATABASE_URL -f db/schema_auth.sql        # adds real auth + family sharing (required for sign up/sign in)
    psql $DATABASE_URL -f db/schema_tasks.sql       # adds to-do events, recurrence, and notifications
+   psql $DATABASE_URL -f db/schema_reminders.sql   # adds event reminders
    psql $DATABASE_URL -f db/supabase_schema.sql    # optional legacy shared-state table
 
    `db/schema_auth.sql` adds:
@@ -41,7 +42,14 @@ Next steps (run locally):
    - `event_completions` — tracks which specific occurrence date of a task was completed, and by whom
    - `notifications` — in-app notifications (e.g. "Alex completed Take out trash"), scoped so users only see their own
 
+   `db/schema_reminders.sql` adds:
+   - `events.reminder_minutes_before` — how long before an event's start time to remind the assigned member(s) (defaults to 30, `0` = at start time, `null` = no reminder). Configurable per-event in 5-minute increments from the event form.
+   - `notifications.type` — distinguishes `'reminder'` rows from general/task-completion notifications, with a partial unique index so the same reminder is never inserted twice
+   - Reminders are in-app only for now (checked client-side every 60s while the app is open); no push notifications or server-side cron yet.
+
    In the Supabase dashboard, also make sure **Email** auth is enabled under Authentication → Providers. If you'd like users to skip email confirmation while testing, disable "Confirm email" under Authentication → Settings.
+
+   For the password-reset flow to work, add `<your-app-url>/reset-password` (and `http://localhost:5173/reset-password` for local dev) to Authentication → URL Configuration → Redirect URLs.
 
 6. Start the example server (demo of setting app.current_user_id):
 
