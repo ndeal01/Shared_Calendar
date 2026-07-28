@@ -12,13 +12,20 @@ const STORAGE_KEYS = {
   currentMonth: 'family-calendar:currentMonth'
 };
 
-const SUPABASE_RECORD_ID = 'shared-family-calendar';
-
 function createDateKey(date) {
   const year = date.getFullYear();
   const month = `${date.getMonth() + 1}`.padStart(2, '0');
   const day = `${date.getDate()}`.padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+function generateInviteCode() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 6; i += 1) {
+    code += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return code;
 }
 
 function readFromStorage(key, fallback) {
@@ -50,139 +57,231 @@ function writeToStorage(key, value) {
   }
 }
 
-async function readRemoteState() {
-  if (!hasSupabaseConfig || !supabase) return null;
-
+function clearStorage(key) {
+  if (typeof window === 'undefined') return;
   try {
-    const { data, error } = await supabase
-      .from('family_calendar_state')
-      .select('payload')
-      .eq('id', SUPABASE_RECORD_ID)
-      .maybeSingle();
-
-    if (error) {
-      console.warn('Unable to load Supabase state', error);
-      return null;
-    }
-
-    return data?.payload ?? null;
-  } catch (error) {
-    console.warn('Unable to load Supabase state', error);
-    return null;
+    window.localStorage.removeItem(key);
+  } catch {
+    // Ignore storage removal failures.
   }
 }
 
-async function writeRemoteState(payload) {
-  if (!hasSupabaseConfig || !supabase) return;
-
-  try {
-    const { error } = await supabase.from('family_calendar_state').upsert({
-      id: SUPABASE_RECORD_ID,
-      payload,
-      updated_at: new Date().toISOString()
-    }, { onConflict: 'id' });
-
-    if (error) {
-      console.warn('Unable to save Supabase state', error);
-    }
-  } catch (error) {
-    console.warn('Unable to save Supabase state', error);
-  }
+function normalizeEventRow(eventRow, assignments) {
+  return {
+    id: eventRow.id,
+    title: eventRow.title,
+    date: eventRow.date,
+    startTime: eventRow.start_time || '',
+    endTime: eventRow.end_time || '',
+    allDay: eventRow.all_day || false,
+    location: eventRow.location || '',
+    notes: eventRow.notes || '',
+    isTask: eventRow.is_task || false,
+    recurrenceFreq: eventRow.recurrence_freq || 'none',
+    recurrenceInterval: eventRow.recurrence_interval || 1,
+    recurrenceDaysOfWeek: eventRow.recurrence_days_of_week || null,
+    recurrenceEndDate: eventRow.recurrence_end_date || null,
+    assignedMemberIds: assignments.filter((a) => a.event_id === eventRow.id).map((a) => a.member_id)
+  };
 }
 
 export function AppProvider({ children }) {
-  const [user, setUser] = useState(() => readFromStorage(STORAGE_KEYS.user, null));
-  const [family, setFamily] = useState(() => readFromStorage(STORAGE_KEYS.family, sampleFamily));
-  const [members, setMembers] = useState(() => readFromStorage(STORAGE_KEYS.members, sampleMembers));
-  const [events, setEvents] = useState(() => readFromStorage(STORAGE_KEYS.events, sampleEvents));
-  const [currentMonth, setCurrentMonth] = useState(() => readDateFromStorage(STORAGE_KEYS.currentMonth, new Date()));
-  const [remoteReady, setRemoteReady] = useState(false);
+  // Local/demo auth (used only when Supabase is not configured).
+  const [localUser, setLocalUser] = useState(() => readFromStorage(STORAGE_KEYS.user, null));
 
+  // Real Supabase auth session.
+  const [session, setSession] = useState(null);
+  const [authReady, setAuthReady] = useState(!hasSupabaseConfig);
+
+  const [family, setFamily] = useState(() => (hasSupabaseConfig ? null : readFromStorage(STORAGE_KEYS.family, sampleFamily)));
+  const [members, setMembers] = useState(() => (hasSupabaseConfig ? [] : readFromStorage(STORAGE_KEYS.members, sampleMembers)));
+  const [events, setEvents] = useState(() => (hasSupabaseConfig ? [] : readFromStorage(STORAGE_KEYS.events, sampleEvents)));
+  const [completions, setCompletions] = useState([]);
+  const [accountHolders, setAccountHolders] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [currentMonth, setCurrentMonth] = useState(() => readDateFromStorage(STORAGE_KEYS.currentMonth, new Date()));
+  const [familyReady, setFamilyReady] = useState(!hasSupabaseConfig);
+  const [authError, setAuthError] = useState('');
+
+  // Subscribe to Supabase auth state.
   useEffect(() => {
+    if (!hasSupabaseConfig || !supabase) return undefined;
+
     let ignore = false;
 
-    async function hydrateFromRemote() {
-      if (!hasSupabaseConfig || !supabase) {
-        setRemoteReady(true);
+    supabase.auth.getSession().then(({ data }) => {
+      if (ignore) return;
+      setSession(data?.session ?? null);
+      setAuthReady(true);
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setAuthReady(true);
+    });
+
+    return () => {
+      ignore = true;
+      listener?.subscription?.unsubscribe();
+    };
+  }, []);
+
+  const user = useMemo(() => {
+    if (!hasSupabaseConfig) return localUser;
+    if (!session?.user) return null;
+
+    return {
+      id: session.user.id,
+      email: session.user.email,
+      displayName: session.user.user_metadata?.display_name || session.user.email?.split('@')[0] || 'You'
+    };
+  }, [session, localUser]);
+
+  // Load the signed-in user's family (and its members/events) from Supabase.
+  useEffect(() => {
+    if (!hasSupabaseConfig || !supabase) return undefined;
+
+    let ignore = false;
+
+    async function loadFamilyForUser() {
+      if (!user?.id) {
+        if (!ignore) {
+          setFamily(null);
+          setMembers([]);
+          setEvents([]);
+          setCompletions([]);
+          setAccountHolders([]);
+          setFamilyReady(true);
+        }
         return;
       }
 
+      setFamilyReady(false);
+
       try {
-        // Try to resolve a family to load. Prefer stored inviteCode if available.
-        let familyRow = null;
-        if (family?.inviteCode) {
-          const { data, error } = await supabase.from('families').select('*').eq('invite_code', family.inviteCode).maybeSingle();
-          if (!error && data) familyRow = data;
+        const { data: membership, error: membershipError } = await supabase
+          .from('family_users')
+          .select('family_id, role, families ( id, name, invite_code )')
+          .eq('user_id', user.id)
+          .maybeSingle();
+
+        if (membershipError) {
+          console.warn('Unable to load family membership', membershipError);
         }
 
-        if (!familyRow) {
-          const { data: familiesList, error: famErr } = await supabase.from('families').select('*').order('created_at', { ascending: true }).limit(1);
-          if (!famErr && familiesList && familiesList.length > 0) familyRow = familiesList[0];
-        }
-
-        if (!familyRow) {
-          // No remote family — nothing to hydrate
-          setRemoteReady(true);
+        if (!membership?.families) {
+          if (!ignore) {
+            setFamily(null);
+            setMembers([]);
+            setEvents([]);
+            setCompletions([]);
+            setAccountHolders([]);
+            setFamilyReady(true);
+          }
           return;
         }
 
-        // load members
-        const { data: membersData } = await supabase.from('members').select('*').eq('family_id', familyRow.id).order('created_at', { ascending: true });
+        const familyRow = membership.families;
 
-        // load events
-        const { data: eventsData } = await supabase.from('events').select('*').eq('family_id', familyRow.id).order('date', { ascending: true });
+        const [{ data: membersData }, { data: eventsData }, { data: accountHoldersData }] = await Promise.all([
+          supabase.from('members').select('*').eq('family_id', familyRow.id).order('created_at', { ascending: true }),
+          supabase.from('events').select('*').eq('family_id', familyRow.id).order('date', { ascending: true }),
+          supabase.from('family_users').select('user_id, display_name, role').eq('family_id', familyRow.id)
+        ]);
 
-        // load assignments
         const eventIds = (eventsData || []).map((e) => e.id);
         let assignments = [];
+        let completionsData = [];
         if (eventIds.length) {
-          const { data: assignData } = await supabase.from('event_assignments').select('*').in('event_id', eventIds);
+          const [{ data: assignData }, { data: completionRows }] = await Promise.all([
+            supabase.from('event_assignments').select('*').in('event_id', eventIds),
+            supabase.from('event_completions').select('*').in('event_id', eventIds)
+          ]);
           assignments = assignData || [];
+          completionsData = completionRows || [];
         }
 
-        const normalizedEvents = (eventsData || []).map((e) => ({
-          id: e.id,
-          title: e.title,
-          date: e.date,
-          startTime: e.start_time || '',
-          endTime: e.end_time || '',
-          allDay: e.all_day || false,
-          location: e.location || '',
-          notes: e.notes || '',
-          assignedMemberIds: (assignments.filter((a) => a.event_id === e.id).map((a) => a.member_id)) || []
-        }));
-
-        setFamily({ id: familyRow.id, name: familyRow.name, inviteCode: familyRow.invite_code });
-        setMembers(membersData || []);
-        setEvents(normalizedEvents || []);
-        setCurrentMonth(new Date());
+        if (!ignore) {
+          setFamily({ id: familyRow.id, name: familyRow.name, inviteCode: familyRow.invite_code, role: membership.role });
+          setMembers(membersData || []);
+          setEvents((eventsData || []).map((eventRow) => normalizeEventRow(eventRow, assignments)));
+          setCompletions(completionsData);
+          setAccountHolders(accountHoldersData || []);
+          setFamilyReady(true);
+        }
       } catch (e) {
-        console.warn('Supabase hydrate failed', e);
+        console.warn('Unable to load family for user', e);
+        if (!ignore) setFamilyReady(true);
       }
-
-      setRemoteReady(true);
     }
 
-    hydrateFromRemote();
+    loadFamilyForUser();
 
     return () => {
       ignore = true;
     };
-  }, []);
+  }, [user?.id]);
+
+  // Load and subscribe to the signed-in user's own notifications.
+  useEffect(() => {
+    if (!hasSupabaseConfig || !supabase || !user?.id) {
+      setNotifications([]);
+      return undefined;
+    }
+
+    let ignore = false;
+
+    async function loadNotifications() {
+      const { data, error } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      if (!ignore && !error) setNotifications(data || []);
+    }
+
+    loadNotifications();
+
+    // Live-update the notification bell when a new notification arrives for
+    // this user (e.g. another family member just completed an assigned task).
+    const channel = supabase
+      .channel(`notifications:${user.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'notifications', filter: `user_id=eq.${user.id}` }, (payload) => {
+        if (payload.eventType === 'INSERT') {
+          setNotifications((current) => [payload.new, ...current]);
+        } else if (payload.eventType === 'UPDATE') {
+          setNotifications((current) => current.map((item) => (item.id === payload.new.id ? payload.new : item)));
+        } else if (payload.eventType === 'DELETE') {
+          setNotifications((current) => current.filter((item) => item.id !== payload.old.id));
+        }
+      })
+      .subscribe();
+
+    return () => {
+      ignore = true;
+      supabase.removeChannel(channel);
+    };
+  }, [user?.id]);
 
   useEffect(() => {
-    writeToStorage(STORAGE_KEYS.user, user);
-  }, [user]);
+    if (hasSupabaseConfig) return;
+    writeToStorage(STORAGE_KEYS.user, localUser);
+  }, [localUser]);
 
   useEffect(() => {
+    if (hasSupabaseConfig) return;
     writeToStorage(STORAGE_KEYS.family, family);
   }, [family]);
 
   useEffect(() => {
+    if (hasSupabaseConfig) return;
     writeToStorage(STORAGE_KEYS.members, members);
   }, [members]);
 
   useEffect(() => {
+    if (hasSupabaseConfig) return;
     writeToStorage(STORAGE_KEYS.events, events);
   }, [events]);
 
@@ -190,52 +289,194 @@ export function AppProvider({ children }) {
     writeToStorage(STORAGE_KEYS.currentMonth, currentMonth.toISOString());
   }, [currentMonth]);
 
-  useEffect(() => {
-    if (!remoteReady) return;
-
-    void writeRemoteState({
-      user,
-      family,
-      members,
-      events,
-      currentMonth: currentMonth.toISOString()
-    });
-  }, [remoteReady, user, family, members, events, currentMonth]);
+  // --- Auth actions ---
 
   const login = (email, displayName) => {
-    setUser({ email, displayName: displayName || email.split('@')[0] });
+    // Demo/local fallback login when Supabase isn't configured.
+    setLocalUser({ email, displayName: displayName || email.split('@')[0] });
   };
 
-  const logout = () => {
-    setUser(null);
+  const signUp = async (email, password, displayName) => {
+    if (!hasSupabaseConfig || !supabase) {
+      login(email, displayName);
+      return { error: null };
+    }
+
+    setAuthError('');
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: { display_name: displayName || email.split('@')[0] },
+        // Send confirmation links back to wherever the app is actually running
+        // (localhost:5173, your LAN IP, or production) instead of Supabase's
+        // default placeholder Site URL.
+        emailRedirectTo: typeof window !== 'undefined' ? window.location.origin : undefined
+      }
+    });
+
+    if (error) {
+      setAuthError(error.message);
+      return { error };
+    }
+
+    if (data?.session) setSession(data.session);
+    return { error: null, needsEmailConfirmation: !data?.session };
   };
 
-  const joinFamily = async (inviteCode) => {
-    if (!inviteCode?.trim()) return;
-    const normalized = inviteCode.trim();
+  const signIn = async (email, password) => {
+    if (!hasSupabaseConfig || !supabase) {
+      login(email);
+      return { error: null };
+    }
 
+    setAuthError('');
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+
+    if (error) {
+      setAuthError(error.message);
+      return { error };
+    }
+
+    setSession(data.session);
+    return { error: null };
+  };
+
+  const logout = async () => {
     if (hasSupabaseConfig && supabase) {
-      // Create family row and use its id
+      await supabase.auth.signOut();
+      setSession(null);
+      setFamily(null);
+      setMembers([]);
+      setEvents([]);
+      return;
+    }
+
+    setLocalUser(null);
+    clearStorage(STORAGE_KEYS.user);
+  };
+
+  // --- Family actions ---
+
+  const createFamily = async (name) => {
+    const trimmedName = name?.trim();
+    if (!trimmedName) return { error: new Error('Family name is required') };
+
+    if (hasSupabaseConfig && supabase && user?.id) {
       try {
         const id = `family-${Date.now()}`;
-        const { data, error } = await supabase.from('families').insert([{ id, name: '', invite_code: normalized }]).select().single();
-        if (!error && data) {
-          setFamily({ id: data.id, name: data.name, inviteCode: data.invite_code });
-          setMembers([]);
-          setEvents([]);
-          return;
-        }
+        const inviteCode = generateInviteCode();
+
+        const { data: familyRow, error: familyError } = await supabase
+          .from('families')
+          .insert([{ id, name: trimmedName, invite_code: inviteCode, owner_id: user.id }])
+          .select()
+          .single();
+
+        if (familyError) return { error: familyError };
+
+        const { error: membershipError } = await supabase.from('family_users').insert([{
+          family_id: familyRow.id,
+          user_id: user.id,
+          role: 'owner',
+          display_name: user.displayName
+        }]);
+
+        if (membershipError) return { error: membershipError };
+
+        setFamily({ id: familyRow.id, name: familyRow.name, inviteCode: familyRow.invite_code, role: 'owner' });
+        setMembers([]);
+        setEvents([]);
+        return { error: null };
       } catch (e) {
-        console.warn('Supabase joinFamily failed', e);
+        return { error: e };
       }
     }
 
-    setFamily((current) => ({ ...current, inviteCode: normalized }));
+    // Local fallback.
+    setFamily({ id: `family-${Date.now()}`, name: trimmedName, inviteCode: generateInviteCode() });
+    return { error: null };
   };
+
+  const joinFamily = async (inviteCode) => {
+    const normalized = inviteCode?.trim().toUpperCase();
+    if (!normalized) return { error: new Error('Invite code is required') };
+
+    if (hasSupabaseConfig && supabase && user?.id) {
+      try {
+        // families is RLS-restricted to members only, so we look the row up
+        // via a narrow SECURITY DEFINER function that matches on invite_code.
+        const { data: matches, error: familyError } = await supabase
+          .rpc('get_family_by_invite_code', { code: normalized });
+
+        if (familyError) return { error: familyError };
+        const familyRow = matches?.[0];
+        if (!familyRow) return { error: new Error('No family found with that invite code') };
+
+        const { error: membershipError } = await supabase.from('family_users').insert([{
+          family_id: familyRow.id,
+          user_id: user.id,
+          role: 'member',
+          display_name: user.displayName
+        }]);
+
+        if (membershipError) {
+          if (membershipError.code === '23505') {
+            return { error: new Error('You already belong to this family') };
+          }
+          return { error: membershipError };
+        }
+
+        const [{ data: membersData }, { data: eventsData }] = await Promise.all([
+          supabase.from('members').select('*').eq('family_id', familyRow.id).order('created_at', { ascending: true }),
+          supabase.from('events').select('*').eq('family_id', familyRow.id).order('date', { ascending: true })
+        ]);
+
+        const eventIds = (eventsData || []).map((e) => e.id);
+        let assignments = [];
+        if (eventIds.length) {
+          const { data: assignData } = await supabase.from('event_assignments').select('*').in('event_id', eventIds);
+          assignments = assignData || [];
+        }
+
+        setFamily({ id: familyRow.id, name: familyRow.name, inviteCode: familyRow.invite_code, role: 'member' });
+        setMembers(membersData || []);
+        setEvents((eventsData || []).map((eventRow) => normalizeEventRow(eventRow, assignments)));
+        return { error: null };
+      } catch (e) {
+        return { error: e };
+      }
+    }
+
+    // Local fallback: just remember the code, no real family to join.
+    setFamily((current) => ({ ...(current || sampleFamily), inviteCode: normalized }));
+    return { error: null };
+  };
+
+  const leaveFamily = async () => {
+    if (hasSupabaseConfig && supabase && user?.id && family?.id) {
+      try {
+        await supabase.from('family_users').delete().eq('family_id', family.id).eq('user_id', user.id);
+      } catch (e) {
+        console.warn('Unable to leave family', e);
+      }
+    }
+
+    setFamily(null);
+    setMembers([]);
+    setEvents([]);
+  };
+
+  // --- Event actions ---
 
   const addEvent = async (eventInput) => {
     const newEvent = {
       id: `event-${Date.now()}`,
+      isTask: false,
+      recurrenceFreq: 'none',
+      recurrenceInterval: 1,
+      recurrenceDaysOfWeek: null,
+      recurrenceEndDate: null,
       ...eventInput,
       assignedMemberIds: eventInput.assignedMemberIds || []
     };
@@ -251,7 +492,12 @@ export function AppProvider({ children }) {
           end_time: newEvent.endTime || null,
           all_day: newEvent.allDay || false,
           location: newEvent.location || null,
-          notes: newEvent.notes || null
+          notes: newEvent.notes || null,
+          is_task: newEvent.isTask || false,
+          recurrence_freq: newEvent.recurrenceFreq || 'none',
+          recurrence_interval: newEvent.recurrenceInterval || 1,
+          recurrence_days_of_week: newEvent.recurrenceFreq === 'weekly' ? newEvent.recurrenceDaysOfWeek : null,
+          recurrence_end_date: newEvent.recurrenceEndDate || null
         }]);
 
         if (newEvent.assignedMemberIds.length > 0) {
@@ -280,7 +526,12 @@ export function AppProvider({ children }) {
           end_time: updates.endTime || null,
           all_day: updates.allDay || false,
           location: updates.location || null,
-          notes: updates.notes || null
+          notes: updates.notes || null,
+          is_task: updates.isTask || false,
+          recurrence_freq: updates.recurrenceFreq || 'none',
+          recurrence_interval: updates.recurrenceInterval || 1,
+          recurrence_days_of_week: updates.recurrenceFreq === 'weekly' ? updates.recurrenceDaysOfWeek : null,
+          recurrence_end_date: updates.recurrenceEndDate || null
         }).eq('id', eventId);
 
         if (Array.isArray(updates.assignedMemberIds)) {
@@ -289,7 +540,6 @@ export function AppProvider({ children }) {
           const rows = updates.assignedMemberIds.map((memberId) => ({ event_id: eventId, member_id: memberId }));
           if (rows.length) await supabase.from('event_assignments').insert(rows);
         }
-
       } catch (e) {
         console.warn('Supabase updateEvent failed', e);
       }
@@ -356,25 +606,129 @@ export function AppProvider({ children }) {
     setEvents((current) => current.map((event) => ({ ...event, assignedMemberIds: event.assignedMemberIds.filter((id) => id !== memberId) })));
   };
 
+  // Link a member profile to one of the real account holders already in this
+  // family (from family_users), so they can receive in-app notifications.
+  const linkMemberToAccount = async (memberId, accountUserId) => {
+    if (!hasSupabaseConfig || !supabase) return { error: new Error('Account linking requires Supabase') };
+
+    try {
+      const { data, error } = await supabase.from('members').update({ user_id: accountUserId || null }).eq('id', memberId).select().single();
+      if (error) return { error };
+      setMembers((current) => current.map((member) => (member.id === memberId ? data : member)));
+      return { error: null };
+    } catch (e) {
+      return { error: e };
+    }
+  };
+
+  // --- Task completion + notifications ---
+
+  const isOccurrenceComplete = (eventId, occurrenceDateKey) =>
+    completions.some((c) => c.event_id === eventId && c.occurrence_date === occurrenceDateKey);
+
+  const toggleTaskCompletion = async (eventId, occurrenceDateKey) => {
+    const alreadyComplete = isOccurrenceComplete(eventId, occurrenceDateKey);
+
+    if (alreadyComplete) {
+      if (hasSupabaseConfig && supabase) {
+        try {
+          await supabase.from('event_completions').delete().eq('event_id', eventId).eq('occurrence_date', occurrenceDateKey);
+        } catch (e) {
+          console.warn('Supabase uncomplete task failed', e);
+        }
+      }
+      setCompletions((current) => current.filter((c) => !(c.event_id === eventId && c.occurrence_date === occurrenceDateKey)));
+      return;
+    }
+
+    const newCompletion = { event_id: eventId, occurrence_date: occurrenceDateKey, completed_by: user?.id || null, completed_at: new Date().toISOString() };
+    setCompletions((current) => [...current, newCompletion]);
+
+    if (hasSupabaseConfig && supabase && family?.id) {
+      try {
+        await supabase.from('event_completions').insert([newCompletion]);
+
+        // Notify every assigned member who has a linked account (other than
+        // whoever just completed the task).
+        const completedEvent = events.find((e) => e.id === eventId);
+        const assignedMemberIds = completedEvent?.assignedMemberIds || [];
+        const recipientUserIds = members
+          .filter((m) => assignedMemberIds.includes(m.id) && m.user_id && m.user_id !== user?.id)
+          .map((m) => m.user_id);
+
+        if (recipientUserIds.length > 0 && completedEvent) {
+          const message = `${user?.displayName || 'Someone'} completed "${completedEvent.title}"`;
+          const notificationRows = recipientUserIds.map((recipientId) => ({
+            family_id: family.id,
+            user_id: recipientId,
+            event_id: eventId,
+            occurrence_date: occurrenceDateKey,
+            message
+          }));
+          await supabase.from('notifications').insert(notificationRows);
+        }
+      } catch (e) {
+        console.warn('Supabase completeTask failed', e);
+      }
+    }
+  };
+
+  const markNotificationRead = async (notificationId) => {
+    setNotifications((current) => current.map((n) => (n.id === notificationId ? { ...n, read: true } : n)));
+    if (hasSupabaseConfig && supabase) {
+      try {
+        await supabase.from('notifications').update({ read: true }).eq('id', notificationId);
+      } catch (e) {
+        console.warn('Supabase markNotificationRead failed', e);
+      }
+    }
+  };
+
+  const markAllNotificationsRead = async () => {
+    setNotifications((current) => current.map((n) => ({ ...n, read: true })));
+    if (hasSupabaseConfig && supabase && user?.id) {
+      try {
+        await supabase.from('notifications').update({ read: true }).eq('user_id', user.id).eq('read', false);
+      } catch (e) {
+        console.warn('Supabase markAllNotificationsRead failed', e);
+      }
+    }
+  };
+
   const value = useMemo(
     () => ({
       user,
+      authReady,
+      authError,
       family,
+      familyReady,
       members,
       events,
+      completions,
+      accountHolders,
+      notifications,
       currentMonth,
       setCurrentMonth,
+      signUp,
+      signIn,
       login,
       logout,
+      createFamily,
       joinFamily,
+      leaveFamily,
       addEvent,
       updateEvent,
       deleteEvent,
       addMember,
       removeMember,
+      linkMemberToAccount,
+      isOccurrenceComplete,
+      toggleTaskCompletion,
+      markNotificationRead,
+      markAllNotificationsRead,
       createDateKey
     }),
-    [user, family, members, events, currentMonth]
+    [user, authReady, authError, family, familyReady, members, events, completions, accountHolders, notifications, currentMonth]
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

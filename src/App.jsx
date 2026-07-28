@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react';
 import { Link, Navigate, NavLink, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useApp } from './context/AppContext';
 import { formatDateLabel, formatMonthLabel } from './data/sampleData';
+import { hasSupabaseConfig } from './supabaseClient';
+import { WEEKDAY_LABELS, getEventOccurrences, eventOccursOnDate } from './utils/recurrence';
 
 function formatDateKey(date) {
   const year = date.getFullYear();
@@ -25,8 +27,96 @@ function getWeekDates(referenceDate) {
 }
 
 function ProtectedRoute({ children }) {
-  const { user } = useApp();
-  return user ? children : <Navigate to="/login" replace />;
+  const { user, authReady, family, familyReady } = useApp();
+
+  if (!authReady || !familyReady) {
+    return (
+      <div className="flex min-h-[40vh] items-center justify-center text-sm font-medium text-slate-500">
+        Loading your calendar…
+      </div>
+    );
+  }
+
+  if (!user) return <Navigate to="/login" replace />;
+  if (!family) return <Navigate to="/onboarding" replace />;
+
+  return children;
+}
+
+function OnboardingRoute({ children }) {
+  const { user, authReady, family, familyReady } = useApp();
+
+  if (!authReady || !familyReady) {
+    return (
+      <div className="flex min-h-[40vh] items-center justify-center text-sm font-medium text-slate-500">
+        Loading…
+      </div>
+    );
+  }
+
+  if (!user) return <Navigate to="/login" replace />;
+  if (family) return <Navigate to="/" replace />;
+
+  return children;
+}
+
+function NotificationBell() {
+  const { notifications, markNotificationRead, markAllNotificationsRead } = useApp();
+  const [open, setOpen] = useState(false);
+  const unreadCount = notifications.filter((n) => !n.read).length;
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-label="Notifications"
+        className="relative rounded-full border border-slate-300 p-2 text-slate-700 hover:bg-slate-100"
+      >
+        🔔
+        {unreadCount > 0 && (
+          <span className="absolute -right-1 -top-1 flex h-4.5 min-w-[1.125rem] items-center justify-center rounded-full bg-rose-600 px-1 text-[10px] font-bold text-white">
+            {unreadCount > 9 ? '9+' : unreadCount}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 z-20 mt-2 w-80 max-w-[calc(100vw-2rem)] rounded-2xl border border-slate-200 bg-white p-3 shadow-lg">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-sm font-semibold text-slate-700">Notifications</p>
+              {unreadCount > 0 && (
+                <button type="button" onClick={markAllNotificationsRead} className="text-xs font-semibold text-teal-600">
+                  Mark all read
+                </button>
+              )}
+            </div>
+            {notifications.length === 0 ? (
+              <p className="py-4 text-center text-sm text-slate-500">No notifications yet.</p>
+            ) : (
+              <div className="max-h-80 space-y-1 overflow-y-auto">
+                {notifications.map((notification) => (
+                  <Link
+                    key={notification.id}
+                    to={notification.occurrence_date ? `/day/${notification.occurrence_date}` : '/'}
+                    onClick={() => {
+                      if (!notification.read) markNotificationRead(notification.id);
+                      setOpen(false);
+                    }}
+                    className={`block rounded-xl px-3 py-2 text-sm transition hover:bg-slate-50 ${notification.read ? 'text-slate-500' : 'bg-teal-50 font-medium text-slate-800'}`}
+                  >
+                    {notification.message}
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 function AppShell({ children }) {
@@ -44,11 +134,12 @@ function AppShell({ children }) {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 lg:px-6">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.3em] text-teal-600">Family Calendar</p>
-            <h1 className="text-xl font-semibold">{family.name}</h1>
+            <h1 className="text-xl font-semibold">{family?.name || 'Family Calendar'}</h1>
           </div>
           <div className="flex items-center gap-3">
             {user ? (
               <>
+                {family && <NotificationBell />}
                 <span className="hidden rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-700 sm:inline">{user.displayName}</span>
                 <button onClick={handleLogout} className="rounded-full border border-slate-300 px-3 py-1 text-sm font-medium text-slate-700">
                   Sign out
@@ -63,6 +154,7 @@ function AppShell({ children }) {
         </div>
       </header>
 
+      {user && family && (
       <nav className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-2 px-4 py-3 lg:px-6">
           {[
@@ -82,6 +174,7 @@ function AppShell({ children }) {
           ))}
         </div>
       </nav>
+      )}
 
       <main className="mx-auto max-w-6xl px-4 py-6 lg:px-6">{children}</main>
     </div>
@@ -89,80 +182,173 @@ function AppShell({ children }) {
 }
 
 function LoginPage() {
-  const { user, login } = useApp();
+  const { user, authReady, signUp, signIn } = useApp();
   const navigate = useNavigate();
+  const [mode, setMode] = useState('signin');
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
-  if (user) {
+  if (authReady && user) {
     return <Navigate to="/" replace />;
   }
 
-  const handleSubmit = (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault();
     if (!email.trim()) return;
-    login(email.trim(), displayName.trim() || undefined);
+    if (hasSupabaseConfig && !password) {
+      setError('Password is required');
+      return;
+    }
+
+    setError('');
+    setNotice('');
+    setSubmitting(true);
+
+    const result = mode === 'signup'
+      ? await signUp(email.trim(), password, displayName.trim())
+      : await signIn(email.trim(), password);
+
+    setSubmitting(false);
+
+    if (result?.error) {
+      setError(result.error.message || 'Something went wrong');
+      return;
+    }
+
+    if (result?.needsEmailConfirmation) {
+      setNotice('Check your email to confirm your account, then sign in.');
+      setMode('signin');
+      return;
+    }
+
     navigate('/');
   };
 
   return (
     <div className="mx-auto max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
       <p className="text-sm font-semibold uppercase tracking-[0.3em] text-teal-600">Welcome</p>
-      <h2 className="mt-2 text-2xl font-semibold">Sign in to your family calendar</h2>
-      <p className="mt-2 text-sm text-slate-600">This demo uses a local session so you can explore the experience right away.</p>
+      <h2 className="mt-2 text-2xl font-semibold">{mode === 'signup' ? 'Create your account' : 'Sign in to your family calendar'}</h2>
+      <p className="mt-2 text-sm text-slate-600">
+        {hasSupabaseConfig
+          ? 'Your account and family data are securely stored and synced across devices.'
+          : 'This demo uses a local session so you can explore the experience right away.'}
+      </p>
+
+      <div className="mt-4 flex gap-2 rounded-full bg-slate-100 p-1 text-sm font-semibold">
+        <button type="button" onClick={() => { setMode('signin'); setError(''); }} className={`flex-1 rounded-full px-3 py-2 transition ${mode === 'signin' ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-500'}`}>
+          Sign in
+        </button>
+        <button type="button" onClick={() => { setMode('signup'); setError(''); }} className={`flex-1 rounded-full px-3 py-2 transition ${mode === 'signup' ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-500'}`}>
+          Sign up
+        </button>
+      </div>
 
       <form onSubmit={handleSubmit} className="mt-6 space-y-4">
         <label className="block text-sm font-medium text-slate-700">
           Email
           <input value={email} onChange={(event) => setEmail(event.target.value)} type="email" className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-2 outline-none ring-0" placeholder="you@example.com" />
         </label>
-        <label className="block text-sm font-medium text-slate-700">
-          Display name (optional)
-          <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-2 outline-none ring-0" placeholder="Mom" />
-        </label>
-        <button type="submit" className="w-full rounded-2xl bg-teal-600 px-4 py-3 font-semibold text-white">
-          Continue
+        {hasSupabaseConfig && (
+          <label className="block text-sm font-medium text-slate-700">
+            Password
+            <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" minLength={6} className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-2 outline-none ring-0" placeholder="••••••••" />
+          </label>
+        )}
+        {mode === 'signup' && (
+          <label className="block text-sm font-medium text-slate-700">
+            Display name (optional)
+            <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-2 outline-none ring-0" placeholder="Mom" />
+          </label>
+        )}
+        {error && <p className="rounded-2xl bg-red-50 px-3 py-2 text-sm font-medium text-red-700">{error}</p>}
+        {notice && <p className="rounded-2xl bg-teal-50 px-3 py-2 text-sm font-medium text-teal-700">{notice}</p>}
+        <button type="submit" disabled={submitting} className="w-full rounded-2xl bg-teal-600 px-4 py-3 font-semibold text-white disabled:opacity-60">
+          {submitting ? 'Please wait…' : mode === 'signup' ? 'Create account' : 'Continue'}
         </button>
       </form>
-
-      <div className="mt-6 rounded-2xl bg-slate-50 p-4 text-sm text-slate-600">
-        <p className="font-medium text-slate-800">Need to join a family?</p>
-        <Link to="/join" className="mt-2 inline-flex font-semibold text-teal-600">
-          Enter your invite code →
-        </Link>
-      </div>
     </div>
   );
 }
 
-function JoinPage() {
-  const { user, joinFamily } = useApp();
-  const [inviteCode, setInviteCode] = useState('');
+function OnboardingPage() {
+  const { user, createFamily, joinFamily } = useApp();
   const navigate = useNavigate();
+  const [tab, setTab] = useState('create');
+  const [familyName, setFamilyName] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
-  if (user) {
-    return <Navigate to="/" replace />;
-  }
-
-  const handleSubmit = (event) => {
+  const handleCreate = async (event) => {
     event.preventDefault();
-    joinFamily(inviteCode);
+    if (!familyName.trim()) return;
+    setError('');
+    setSubmitting(true);
+    const result = await createFamily(familyName.trim());
+    setSubmitting(false);
+    if (result?.error) {
+      setError(result.error.message || 'Unable to create family');
+      return;
+    }
+    navigate('/');
+  };
+
+  const handleJoin = async (event) => {
+    event.preventDefault();
+    if (!inviteCode.trim()) return;
+    setError('');
+    setSubmitting(true);
+    const result = await joinFamily(inviteCode.trim());
+    setSubmitting(false);
+    if (result?.error) {
+      setError(result.error.message || 'Unable to join family');
+      return;
+    }
     navigate('/');
   };
 
   return (
     <div className="mx-auto max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-      <p className="text-sm font-semibold uppercase tracking-[0.3em] text-teal-600">Join family</p>
-      <h2 className="mt-2 text-2xl font-semibold">Enter your invite code</h2>
-      <form onSubmit={handleSubmit} className="mt-6 space-y-4">
-        <label className="block text-sm font-medium text-slate-700">
-          Invite code
-          <input value={inviteCode} onChange={(event) => setInviteCode(event.target.value)} className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-2 outline-none ring-0" placeholder="FAMILY123" />
-        </label>
-        <button type="submit" className="w-full rounded-2xl bg-teal-600 px-4 py-3 font-semibold text-white">
-          Join family
+      <p className="text-sm font-semibold uppercase tracking-[0.3em] text-teal-600">Welcome{user?.displayName ? `, ${user.displayName}` : ''}</p>
+      <h2 className="mt-2 text-2xl font-semibold">Set up your family calendar</h2>
+      <p className="mt-2 text-sm text-slate-600">Create a brand new family calendar, or join one using an invite code from a family member.</p>
+
+      <div className="mt-4 flex gap-2 rounded-full bg-slate-100 p-1 text-sm font-semibold">
+        <button type="button" onClick={() => { setTab('create'); setError(''); }} className={`flex-1 rounded-full px-3 py-2 transition ${tab === 'create' ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-500'}`}>
+          Create family
         </button>
-      </form>
+        <button type="button" onClick={() => { setTab('join'); setError(''); }} className={`flex-1 rounded-full px-3 py-2 transition ${tab === 'join' ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-500'}`}>
+          Join with code
+        </button>
+      </div>
+
+      {tab === 'create' ? (
+        <form onSubmit={handleCreate} className="mt-6 space-y-4">
+          <label className="block text-sm font-medium text-slate-700">
+            Family name
+            <input value={familyName} onChange={(event) => setFamilyName(event.target.value)} className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-2 outline-none ring-0" placeholder="The Smiths" />
+          </label>
+          {error && <p className="rounded-2xl bg-red-50 px-3 py-2 text-sm font-medium text-red-700">{error}</p>}
+          <button type="submit" disabled={submitting} className="w-full rounded-2xl bg-teal-600 px-4 py-3 font-semibold text-white disabled:opacity-60">
+            {submitting ? 'Creating…' : 'Create family calendar'}
+          </button>
+        </form>
+      ) : (
+        <form onSubmit={handleJoin} className="mt-6 space-y-4">
+          <label className="block text-sm font-medium text-slate-700">
+            Invite code
+            <input value={inviteCode} onChange={(event) => setInviteCode(event.target.value.toUpperCase())} className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-2 outline-none ring-0 uppercase tracking-widest" placeholder="FAMILY123" />
+          </label>
+          {error && <p className="rounded-2xl bg-red-50 px-3 py-2 text-sm font-medium text-red-700">{error}</p>}
+          <button type="submit" disabled={submitting} className="w-full rounded-2xl bg-teal-600 px-4 py-3 font-semibold text-white disabled:opacity-60">
+            {submitting ? 'Joining…' : 'Join family'}
+          </button>
+        </form>
+      )}
     </div>
   );
 }
@@ -181,20 +367,28 @@ function HomePage() {
   while (cells.length % 7 !== 0) cells.push(null);
 
   const dayEvents = useMemo(() => {
-    return (dateKey) => events.filter((event) => event.date === dateKey);
+    return (dateKey) => events.filter((event) => eventOccursOnDate(event, dateKey));
   }, [events]);
 
   const upcomingEvents = useMemo(() => {
-    return [...events]
-      .filter((event) => event.date >= todayKey)
+    const rangeEndDate = new Date();
+    rangeEndDate.setDate(rangeEndDate.getDate() + 90);
+    const rangeEndKey = formatDateKey(rangeEndDate);
+
+    const occurrences = events.flatMap((event) =>
+      getEventOccurrences(event, todayKey, rangeEndKey).map((occurrenceDate) => ({ event, occurrenceDate }))
+    );
+
+    return occurrences
       .sort((left, right) => {
-        if (left.date === right.date) {
-          return (left.startTime || '').localeCompare(right.startTime || '');
+        if (left.occurrenceDate === right.occurrenceDate) {
+          return (left.event.startTime || '').localeCompare(right.event.startTime || '');
         }
 
-        return left.date.localeCompare(right.date);
+        return left.occurrenceDate.localeCompare(right.occurrenceDate);
       })
-      .slice(0, 3);
+      .slice(0, 3)
+      .map(({ event, occurrenceDate }) => ({ ...event, date: occurrenceDate }));
   }, [events, todayKey]);
 
   return (
@@ -212,11 +406,11 @@ function HomePage() {
           </div>
         </div>
       ) : (
+        <>
         <div className="rounded-[1.5rem] border border-slate-200 bg-gradient-to-br from-teal-600 to-cyan-600 p-4 text-white shadow-sm sm:p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-teal-100">Today at a glance</p>
-            <h3 className="mt-1 text-lg font-semibold">{upcomingEvents.length > 0 ? 'Upcoming family plans' : 'Your calendar is clear'}</h3>
+            <h3 className="text-lg font-semibold">{upcomingEvents.length > 0 ? 'Upcoming family plans' : 'Your calendar is clear'}</h3>
           </div>
           <button onClick={() => setCurrentMonth(new Date())} className="rounded-full border border-white/30 bg-white/15 px-3 py-2 text-sm font-medium text-white transition hover:bg-white/25">
             Jump to today
@@ -286,14 +480,21 @@ function HomePage() {
                     <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-600 sm:text-[10px]">{matchingEvents.length}</span>
                   )}
                 </div>
-                <div className="mt-1 flex-1 space-y-1 overflow-hidden">
+                {matchingEvents.length > 0 && (
+                  <div className="mt-1 flex flex-1 items-end justify-center gap-0.5 sm:hidden">
+                    {matchingEvents.slice(0, 3).map((event) => (
+                      <span key={event.id} className="h-1.5 w-1.5 rounded-full bg-teal-500" />
+                    ))}
+                  </div>
+                )}
+                <div className="mt-1 hidden flex-1 space-y-1 overflow-hidden sm:block">
                   {matchingEvents.slice(0, 2).map((event) => (
-                    <div key={event.id} className="truncate rounded-lg bg-slate-100 px-1.5 py-1 text-[9px] font-medium text-slate-700 sm:text-[10px]">
+                    <div key={event.id} className="truncate rounded-lg bg-slate-100 px-1.5 py-1 text-[10px] font-medium text-slate-700">
                       {event.title}
                     </div>
                   ))}
                   {matchingEvents.length > 2 && (
-                    <div className="text-[9px] font-semibold text-slate-500 sm:text-[10px]">+{matchingEvents.length - 2} more</div>
+                    <div className="text-[10px] font-semibold text-slate-500">+{matchingEvents.length - 2} more</div>
                   )}
                 </div>
               </Link>
@@ -301,10 +502,12 @@ function HomePage() {
           })}
         </div>
       </div>
+      </>
+    )}
     </div>
   );
 }
-
+ 
 function WeekPage() {
   const { dateKey } = useParams();
   const { events } = useApp();
@@ -342,7 +545,7 @@ function WeekPage() {
       <div className="grid gap-3 lg:grid-cols-7">
         {weekDates.map((date) => {
           const dateKey = formatDateKey(date);
-          const matchingEvents = events.filter((event) => event.date === dateKey);
+          const matchingEvents = events.filter((event) => eventOccursOnDate(event, dateKey));
           const isToday = dateKey === formatDateKey(new Date());
 
           return (
@@ -376,10 +579,10 @@ function WeekPage() {
 
 function DayPage() {
   const { dateKey } = useParams();
-  const { events, members, deleteEvent } = useApp();
+  const { events, members, deleteEvent, isOccurrenceComplete, toggleTaskCompletion } = useApp();
   const resolvedDateKey = dateKey === 'today' ? formatDateKey(new Date()) : dateKey;
   const [activeMemberId, setActiveMemberId] = useState('all');
-  const dayEvents = events.filter((event) => event.date === resolvedDateKey);
+  const dayEvents = events.filter((event) => eventOccursOnDate(event, resolvedDateKey));
   const filteredEvents = dayEvents.filter((event) => activeMemberId === 'all' || event.assignedMemberIds.includes(activeMemberId));
   const dateLabel = formatDateLabel(resolvedDateKey);
 
@@ -418,12 +621,28 @@ function DayPage() {
           <div className="space-y-3">
             {filteredEvents.map((event) => {
               const assignedMembers = members.filter((member) => event.assignedMemberIds.includes(member.id));
+              const isComplete = event.isTask && isOccurrenceComplete(event.id, resolvedDateKey);
               return (
                 <div key={event.id} className="rounded-2xl border border-slate-200 p-4">
                   <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <h3 className="text-lg font-semibold">{event.title}</h3>
-                      <p className="mt-1 text-sm text-slate-600">{event.allDay ? 'All day' : `${event.startTime || '--'} – ${event.endTime || '--'}`}</p>
+                    <div className="flex items-start gap-3">
+                      {event.isTask && (
+                        <button
+                          type="button"
+                          onClick={() => toggleTaskCompletion(event.id, resolvedDateKey)}
+                          aria-label={isComplete ? 'Mark as not done' : 'Mark as done'}
+                          className={`mt-1 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full border-2 text-xs font-bold transition ${isComplete ? 'border-teal-600 bg-teal-600 text-white' : 'border-slate-300 text-transparent hover:border-teal-500'}`}
+                        >
+                          ✓
+                        </button>
+                      )}
+                      <div>
+                        <h3 className={`text-lg font-semibold ${isComplete ? 'text-slate-400 line-through' : ''}`}>{event.title}</h3>
+                        <p className="mt-1 text-sm text-slate-600">{event.allDay ? 'All day' : `${event.startTime || '--'} – ${event.endTime || '--'}`}</p>
+                        {event.recurrenceFreq && event.recurrenceFreq !== 'none' && (
+                          <p className="mt-1 text-xs font-medium text-teal-700">🔁 Repeats {event.recurrenceFreq}</p>
+                        )}
+                      </div>
                     </div>
                     <div className="flex gap-2">
                       <Link to={`/event/${event.id}/edit`} className="rounded-full border border-slate-200 px-3 py-1 text-sm font-medium">Edit</Link>
@@ -479,7 +698,12 @@ function EventFormPage() {
     allDay: existingEvent?.allDay || false,
     location: existingEvent?.location || '',
     notes: existingEvent?.notes || '',
-    assignedMemberIds: existingEvent?.assignedMemberIds || []
+    assignedMemberIds: existingEvent?.assignedMemberIds || [],
+    isTask: existingEvent?.isTask || false,
+    recurrenceFreq: existingEvent?.recurrenceFreq || 'none',
+    recurrenceInterval: existingEvent?.recurrenceInterval || 1,
+    recurrenceDaysOfWeek: existingEvent?.recurrenceDaysOfWeek || [],
+    recurrenceEndDate: existingEvent?.recurrenceEndDate || ''
   });
 
   const handleChange = (event) => {
@@ -496,6 +720,15 @@ function EventFormPage() {
     }));
   };
 
+  const handleWeekdayToggle = (dayIndex) => {
+    setForm((current) => ({
+      ...current,
+      recurrenceDaysOfWeek: current.recurrenceDaysOfWeek.includes(dayIndex)
+        ? current.recurrenceDaysOfWeek.filter((d) => d !== dayIndex)
+        : [...current.recurrenceDaysOfWeek, dayIndex].sort()
+    }));
+  };
+
   const handleSubmit = (event) => {
     event.preventDefault();
     if (!form.title.trim() || !form.date) return;
@@ -508,7 +741,12 @@ function EventFormPage() {
       allDay: form.allDay,
       location: form.location.trim(),
       notes: form.notes.trim(),
-      assignedMemberIds: form.assignedMemberIds
+      assignedMemberIds: form.assignedMemberIds,
+      isTask: form.isTask,
+      recurrenceFreq: form.recurrenceFreq,
+      recurrenceInterval: Number(form.recurrenceInterval) || 1,
+      recurrenceDaysOfWeek: form.recurrenceFreq === 'weekly' ? form.recurrenceDaysOfWeek : [],
+      recurrenceEndDate: form.recurrenceEndDate || null
     };
 
     if (existingEvent) {
@@ -576,6 +814,58 @@ function EventFormPage() {
           </div>
         </div>
 
+        <label className="flex items-center gap-3 rounded-2xl border border-slate-200 px-3 py-3 text-sm font-medium text-slate-700">
+          <input name="isTask" type="checkbox" checked={form.isTask} onChange={handleChange} />
+          Make this a to-do item (can be checked off when done)
+        </label>
+
+        <div className="rounded-2xl border border-slate-200 p-4">
+          <p className="text-sm font-medium text-slate-700">Repeats</p>
+          <div className="mt-3 grid gap-4 sm:grid-cols-2">
+            <label className="block text-sm font-medium text-slate-700">
+              Frequency
+              <select name="recurrenceFreq" value={form.recurrenceFreq} onChange={handleChange} className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-2">
+                <option value="none">Does not repeat</option>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+              </select>
+            </label>
+
+            {form.recurrenceFreq !== 'none' && (
+              <label className="block text-sm font-medium text-slate-700">
+                Every
+                <div className="mt-2 flex items-center gap-2">
+                  <input name="recurrenceInterval" type="number" min="1" value={form.recurrenceInterval} onChange={handleChange} className="w-20 rounded-2xl border border-slate-200 px-3 py-2" />
+                  <span className="text-sm text-slate-500">
+                    {form.recurrenceFreq === 'daily' ? 'day(s)' : form.recurrenceFreq === 'weekly' ? 'week(s)' : 'month(s)'}
+                  </span>
+                </div>
+              </label>
+            )}
+          </div>
+
+          {form.recurrenceFreq === 'weekly' && (
+            <div className="mt-4">
+              <p className="text-sm font-medium text-slate-700">On these days</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {WEEKDAY_LABELS.map((label, index) => (
+                  <button key={label} type="button" onClick={() => handleWeekdayToggle(index)} className={`h-9 w-9 rounded-full text-sm font-medium ${form.recurrenceDaysOfWeek.includes(index) ? 'bg-teal-600 text-white' : 'border border-slate-200 text-slate-700'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {form.recurrenceFreq !== 'none' && (
+            <label className="mt-4 block text-sm font-medium text-slate-700">
+              End date (optional)
+              <input name="recurrenceEndDate" type="date" value={form.recurrenceEndDate} onChange={handleChange} className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-2" />
+            </label>
+          )}
+        </div>
+
         <div className="flex items-center justify-between gap-3 pt-2">
           <button type="button" onClick={() => navigate(-1)} className="rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600">
             Cancel
@@ -590,7 +880,7 @@ function EventFormPage() {
 }
 
 function MembersPage() {
-  const { members, addMember, removeMember } = useApp();
+  const { members, addMember, removeMember, accountHolders, linkMemberToAccount } = useApp();
   const [name, setName] = useState('');
   const [color, setColor] = useState('#3b82f6');
 
@@ -599,6 +889,11 @@ function MembersPage() {
     if (!name.trim()) return;
     addMember(name.trim(), color);
     setName('');
+  };
+
+  const accountLabel = (userId) => {
+    const holder = accountHolders.find((holder) => holder.user_id === userId);
+    return holder?.display_name || 'Unknown account';
   };
 
   return (
@@ -612,17 +907,41 @@ function MembersPage() {
         </div>
         <div className="space-y-3">
           {members.map((member) => (
-            <div key={member.id} className="flex items-center justify-between rounded-2xl border border-slate-200 p-3">
-              <div className="flex items-center gap-3">
-                <span className="h-3.5 w-3.5 rounded-full" style={{ backgroundColor: member.color }} />
-                <div>
-                  <p className="font-medium">{member.name}</p>
-                  <p className="text-sm text-slate-500">{member.role}</p>
+            <div key={member.id} className="rounded-2xl border border-slate-200 p-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <span className="h-3.5 w-3.5 rounded-full" style={{ backgroundColor: member.color }} />
+                  <div>
+                    <p className="font-medium">{member.name}</p>
+                    <p className="text-sm text-slate-500">{member.role}</p>
+                  </div>
                 </div>
+                <button onClick={() => removeMember(member.id)} className="text-sm font-semibold text-red-600">
+                  Remove
+                </button>
               </div>
-              <button onClick={() => removeMember(member.id)} className="text-sm font-semibold text-red-600">
-                Remove
-              </button>
+              {hasSupabaseConfig && (
+                <div className="mt-3 border-t border-slate-100 pt-3">
+                  <label className="block text-xs font-medium text-slate-500">
+                    Linked account (for notifications)
+                    <select
+                      value={member.user_id || ''}
+                      onChange={(event) => linkMemberToAccount(member.id, event.target.value || null)}
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-2 py-1.5 text-sm"
+                    >
+                      <option value="">Not linked</option>
+                      {accountHolders.map((holder) => (
+                        <option key={holder.user_id} value={holder.user_id}>
+                          {holder.display_name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {member.user_id && (
+                    <p className="mt-1 text-xs text-teal-700">Linked to {accountLabel(member.user_id)}</p>
+                  )}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -649,7 +968,27 @@ function MembersPage() {
 }
 
 function SettingsPage() {
-  const { family, user } = useApp();
+  const { family, user, leaveFamily } = useApp();
+  const navigate = useNavigate();
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    if (!family?.inviteCode) return;
+    try {
+      await navigator.clipboard.writeText(family.inviteCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard API may be unavailable; ignore silently.
+    }
+  };
+
+  const handleLeave = async () => {
+    if (!window.confirm('Leave this family calendar? You can rejoin later with the invite code.')) return;
+    await leaveFamily();
+    navigate('/onboarding');
+  };
+
   return (
     <div className="mx-auto max-w-2xl rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
       <p className="text-sm font-semibold uppercase tracking-[0.3em] text-slate-500">Settings</p>
@@ -657,16 +996,37 @@ function SettingsPage() {
       <div className="mt-6 space-y-4 rounded-2xl bg-slate-50 p-4 text-sm text-slate-700">
         <div className="flex items-center justify-between">
           <span>Family</span>
-          <span className="font-semibold text-slate-900">{family.name}</span>
+          <span className="font-semibold text-slate-900">{family?.name}</span>
         </div>
         <div className="flex items-center justify-between">
-          <span>Invite code</span>
-          <span className="font-semibold text-slate-900">{family.inviteCode}</span>
+          <span>Your role</span>
+          <span className="font-semibold capitalize text-slate-900">{family?.role || 'member'}</span>
         </div>
         <div className="flex items-center justify-between">
           <span>Signed in as</span>
           <span className="font-semibold text-slate-900">{user?.displayName || 'Guest'}</span>
         </div>
+      </div>
+
+      <div className="mt-6 rounded-2xl border border-teal-200 bg-teal-50 p-4">
+        <p className="text-sm font-semibold text-teal-900">Invite family members</p>
+        <p className="mt-1 text-sm text-teal-700">Share this code so others can join your family calendar.</p>
+        <div className="mt-3 flex items-center gap-3">
+          <span className="flex-1 rounded-2xl border border-teal-300 bg-white px-4 py-2 text-center text-lg font-bold tracking-[0.3em] text-teal-700">
+            {family?.inviteCode}
+          </span>
+          <button onClick={handleCopy} className="rounded-2xl bg-teal-600 px-4 py-2 text-sm font-semibold text-white">
+            {copied ? 'Copied!' : 'Copy'}
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-6 rounded-2xl border border-red-200 bg-red-50 p-4">
+        <p className="text-sm font-semibold text-red-900">Leave family</p>
+        <p className="mt-1 text-sm text-red-700">You'll lose access to this family's calendar until you rejoin with the invite code.</p>
+        <button onClick={handleLeave} className="mt-3 rounded-2xl border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-700">
+          Leave this family
+        </button>
       </div>
     </div>
   );
@@ -677,7 +1037,7 @@ export default function App() {
     <AppShell>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
-        <Route path="/join" element={<JoinPage />} />
+        <Route path="/onboarding" element={<OnboardingRoute><OnboardingPage /></OnboardingRoute>} />
         <Route path="/" element={<ProtectedRoute><HomePage /></ProtectedRoute>} />
         <Route path="/week/:dateKey" element={<ProtectedRoute><WeekPage /></ProtectedRoute>} />
         <Route path="/day/:dateKey" element={<ProtectedRoute><DayPage /></ProtectedRoute>} />
