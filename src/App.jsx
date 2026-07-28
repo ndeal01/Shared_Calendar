@@ -122,61 +122,112 @@ function NotificationBell() {
 function AppShell({ children }) {
   const { user, family, logout } = useApp();
   const navigate = useNavigate();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const handleLogout = () => {
     logout();
+    setSidebarOpen(false);
     navigate('/login');
   };
 
-  return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="border-b border-slate-200 bg-white/80 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 lg:px-6">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-teal-600">Family Calendar</p>
-            <h1 className="text-xl font-semibold">{family?.name || 'Family Calendar'}</h1>
-          </div>
-          <div className="flex items-center gap-3">
-            {user ? (
-              <>
-                {family && <NotificationBell />}
-                <span className="hidden rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-700 sm:inline">{user.displayName}</span>
-                <button onClick={handleLogout} className="rounded-full border border-slate-300 px-3 py-1 text-sm font-medium text-slate-700">
-                  Sign out
-                </button>
-              </>
-            ) : (
-              <Link to="/login" className="rounded-full bg-teal-600 px-3 py-1 text-sm font-medium text-white">
-                Sign in
-              </Link>
-            )}
-          </div>
-        </div>
-      </header>
+  const navLinks = [
+    ['/', 'Calendar'],
+    ['/week/today', 'Week'],
+    ['/day/today', 'Today'],
+    ['/members', 'Members'],
+    ['/settings', 'Settings']
+  ];
 
-      {user && family && (
-      <nav className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-2 px-4 py-3 lg:px-6">
-          {[
-            ['/', 'Calendar'],
-            ['/week/today', 'Week'],
-            ['/day/today', 'Today'],
-            ['/members', 'Members'],
-            ['/settings', 'Settings']
-          ].map(([to, label]) => (
+  const showNav = user && family;
+
+  const sidebarContent = (
+    <div className="flex h-full flex-col">
+      <div className="px-5 pb-4 pt-5">
+        <p className="text-xs font-semibold uppercase tracking-[0.3em] text-teal-600">Family Calendar</p>
+        <h1 className="mt-1 text-xl font-semibold text-slate-900">{family?.name || 'Family Calendar'}</h1>
+      </div>
+
+      {showNav && (
+        <nav className="flex-1 space-y-1 px-3">
+          {navLinks.map(([to, label]) => (
             <NavLink
               key={to}
               to={to}
-              className={({ isActive }) => `rounded-full px-3 py-2 text-sm font-medium ${isActive ? 'bg-teal-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+              onClick={() => setSidebarOpen(false)}
+              end={to === '/'}
+              className={({ isActive }) => `block rounded-2xl px-3 py-2.5 text-sm font-medium transition ${isActive ? 'bg-teal-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
             >
               {label}
             </NavLink>
           ))}
-        </div>
-      </nav>
+        </nav>
       )}
 
-      <main className="mx-auto max-w-6xl px-4 py-6 lg:px-6">{children}</main>
+      {!showNav && <div className="flex-1" />}
+
+      <div className="border-t border-slate-200 px-5 py-4">
+        {user ? (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-700">{user.displayName}</span>
+              {family && <NotificationBell />}
+            </div>
+            <button onClick={handleLogout} className="w-full rounded-full border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100">
+              Sign out
+            </button>
+          </div>
+        ) : (
+          <Link to="/login" onClick={() => setSidebarOpen(false)} className="block rounded-full bg-teal-600 px-3 py-2 text-center text-sm font-medium text-white">
+            Sign in
+          </Link>
+        )}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900 lg:flex">
+      {/* Mobile top bar */}
+      <header className="flex items-center justify-between border-b border-slate-200 bg-white/80 px-4 py-3 backdrop-blur lg:hidden">
+        <button
+          type="button"
+          onClick={() => setSidebarOpen(true)}
+          aria-label="Open menu"
+          className="rounded-full border border-slate-300 p-2 text-slate-700"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="3" y1="6" x2="21" y2="6" />
+            <line x1="3" y1="12" x2="21" y2="12" />
+            <line x1="3" y1="18" x2="21" y2="18" />
+          </svg>
+        </button>
+        <h1 className="text-base font-semibold">{family?.name || 'Family Calendar'}</h1>
+        {user && family ? <NotificationBell /> : <span className="w-9" />}
+      </header>
+
+      {/* Mobile drawer */}
+      {sidebarOpen && (
+        <div className="fixed inset-0 z-40 lg:hidden">
+          <div className="absolute inset-0 bg-slate-900/40" onClick={() => setSidebarOpen(false)} />
+          <div className="absolute inset-y-0 left-0 w-72 max-w-[85vw] bg-white shadow-xl">
+            <div className="flex justify-end px-3 pt-3">
+              <button type="button" onClick={() => setSidebarOpen(false)} aria-label="Close menu" className="rounded-full border border-slate-300 p-2 text-slate-700">
+                ✕
+              </button>
+            </div>
+            {sidebarContent}
+          </div>
+        </div>
+      )}
+
+      {/* Desktop sidebar */}
+      <aside className="hidden w-64 flex-shrink-0 border-r border-slate-200 bg-white lg:sticky lg:top-0 lg:flex lg:h-screen lg:flex-col">
+        {sidebarContent}
+      </aside>
+
+      <main className="flex-1 px-4 py-6 lg:px-8">
+        <div className="mx-auto max-w-5xl">{children}</div>
+      </main>
     </div>
   );
 }
