@@ -388,7 +388,6 @@ function ForgotPasswordPage() {
 
 function ResetPasswordPage() {
   const { updatePassword } = useApp();
-  const navigate = useNavigate();
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -418,7 +417,14 @@ function ResetPasswordPage() {
     }
 
     setDone(true);
-    setTimeout(() => navigate('/'), 1500);
+    // Use a full page reload (not client-side navigate) so the app re-mounts
+    // fresh and re-fetches the session + family from scratch. Updating the
+    // password mid-recovery-session can momentarily disturb the in-memory
+    // auth state in ways that make the existing family-loading effect skip
+    // a re-fetch, which was stranding already-set-up users on /onboarding.
+    setTimeout(() => {
+      window.location.href = '/';
+    }, 1500);
   };
 
   return (

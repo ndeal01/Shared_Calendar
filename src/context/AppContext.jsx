@@ -171,14 +171,36 @@ export function AppProvider({ children }) {
       setFamilyReady(false);
 
       try {
-        const { data: membership, error: membershipError } = await supabase
+        let { data: membership, error: membershipError } = await supabase
           .from('family_users')
           .select('family_id, role, families ( id, name, invite_code )')
           .eq('user_id', user.id)
           .maybeSingle();
 
         if (membershipError) {
-          console.warn('Unable to load family membership', membershipError);
+          // A transient error (network blip, momentary RLS/JWT propagation
+          // delay right after a password update) is NOT the same as "this
+          // user has no family". Retry once after a short delay instead of
+          // permanently concluding they need onboarding — this effect only
+          // re-runs when user?.id changes, so getting this wrong stranded
+          // already-set-up users on /onboarding.
+          console.warn('Unable to load family membership, retrying once', membershipError);
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          if (ignore) return;
+
+          const retry = await supabase
+            .from('family_users')
+            .select('family_id, role, families ( id, name, invite_code )')
+            .eq('user_id', user.id)
+            .maybeSingle();
+
+          if (retry.error) {
+            console.warn('Unable to load family membership after retry', retry.error);
+            if (!ignore) setFamilyReady(true);
+            return;
+          }
+
+          membership = retry.data;
         }
 
         if (!membership?.families) {
