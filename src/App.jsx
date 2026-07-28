@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { Link, Navigate, NavLink, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useApp } from './context/AppContext';
 import { useToast } from './context/ToastContext';
 import { formatDateLabel, formatMonthLabel } from './data/sampleData';
@@ -1349,6 +1349,20 @@ function SettingsPage() {
 }
 
 export default function App() {
+  const { passwordRecovery } = useApp();
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  // Supabase fires this the moment the recovery link's tokens are consumed.
+  // Force the user to /reset-password regardless of where they landed —
+  // needed because an unconfigured Redirect URL allowlist makes Supabase
+  // fall back to the Site URL (usually "/"), dropping our intended path.
+  useEffect(() => {
+    if (passwordRecovery && location.pathname !== '/reset-password') {
+      navigate('/reset-password', { replace: true });
+    }
+  }, [passwordRecovery, location.pathname, navigate]);
+
   return (
     <ErrorBoundary>
       <AppShell>

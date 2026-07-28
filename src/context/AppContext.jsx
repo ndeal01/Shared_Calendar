@@ -107,6 +107,12 @@ export function AppProvider({ children }) {
   const [currentMonth, setCurrentMonth] = useState(() => readDateFromStorage(STORAGE_KEYS.currentMonth, new Date()));
   const [familyReady, setFamilyReady] = useState(!hasSupabaseConfig);
   const [authError, setAuthError] = useState('');
+  // Set when Supabase fires a PASSWORD_RECOVERY auth event (the user just
+  // clicked a password-reset email link). We use this instead of relying on
+  // the URL path, because if "/reset-password" isn't in Supabase's Redirect
+  // URLs allowlist, it silently falls back to the Site URL (usually "/") and
+  // drops the path — but the recovery session/event still fires either way.
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
 
   // Subscribe to Supabase auth state.
   useEffect(() => {
@@ -120,7 +126,8 @@ export function AppProvider({ children }) {
       setAuthReady(true);
     });
 
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    const { data: listener } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      if (event === 'PASSWORD_RECOVERY') setPasswordRecovery(true);
       setSession(nextSession);
       setAuthReady(true);
     });
@@ -434,8 +441,11 @@ export function AppProvider({ children }) {
     if (!hasSupabaseConfig || !supabase) return { error: new Error('Password update requires Supabase') };
 
     const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (!error) setPasswordRecovery(false);
     return { error: error || null };
   };
+
+  const clearPasswordRecovery = () => setPasswordRecovery(false);
 
   const logout = async () => {
     if (hasSupabaseConfig && supabase) {
@@ -840,6 +850,8 @@ export function AppProvider({ children }) {
       logout,
       requestPasswordReset,
       updatePassword,
+      passwordRecovery,
+      clearPasswordRecovery,
       createFamily,
       joinFamily,
       leaveFamily,
@@ -855,7 +867,7 @@ export function AppProvider({ children }) {
       markAllNotificationsRead,
       createDateKey
     }),
-    [user, authReady, authError, family, familyReady, members, events, completions, accountHolders, notifications, currentMonth]
+    [user, authReady, authError, family, familyReady, members, events, completions, accountHolders, notifications, currentMonth, passwordRecovery]
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
