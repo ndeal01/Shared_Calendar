@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link, Navigate, NavLink, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useApp } from './context/AppContext';
+import { useToast } from './context/ToastContext';
 import { formatDateLabel, formatMonthLabel } from './data/sampleData';
 import { hasSupabaseConfig } from './supabaseClient';
 import { WEEKDAY_LABELS, getEventOccurrences, eventOccursOnDate } from './utils/recurrence';
@@ -406,6 +407,17 @@ function OnboardingPage() {
 
 function HomePage() {
   const { events, members, currentMonth, setCurrentMonth, addMember } = useApp();
+  const toast = useToast();
+  const [addingMember, setAddingMember] = useState(false);
+
+  const handleQuickAddMember = async () => {
+    const name = prompt('Member name');
+    if (!name || !name.trim()) return;
+    setAddingMember(true);
+    const { error } = await addMember(name.trim(), '#3b82f6');
+    setAddingMember(false);
+    if (error) toast.error(error);
+  };
 
   const monthStart = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1);
   const monthDays = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0).getDate();
@@ -449,10 +461,9 @@ function HomePage() {
           <h2 className="text-2xl font-semibold">Start your first family calendar</h2>
           <p className="mt-2 text-sm text-slate-600">Add family members and schedule your first event — everything will sync across devices if Supabase is configured.</p>
           <div className="mt-4 flex flex-wrap justify-center gap-3">
-            <button onClick={() => {
-              const name = prompt('Member name');
-              if (name) addMember(name, '#3b82f6');
-            }} className="rounded-full bg-teal-600 px-4 py-2 text-white font-semibold">Add a family member</button>
+            <button onClick={handleQuickAddMember} disabled={addingMember} className="rounded-full bg-teal-600 px-4 py-2 text-white font-semibold disabled:opacity-60">
+              {addingMember ? 'Adding…' : 'Add a family member'}
+            </button>
             <button onClick={() => window.location.href = '/event/new'} className="rounded-full border border-slate-200 px-4 py-2 font-semibold text-slate-700">Create an event</button>
           </div>
         </div>
@@ -631,11 +642,34 @@ function WeekPage() {
 function DayPage() {
   const { dateKey } = useParams();
   const { events, members, deleteEvent, isOccurrenceComplete, toggleTaskCompletion } = useApp();
+  const toast = useToast();
   const resolvedDateKey = dateKey === 'today' ? formatDateKey(new Date()) : dateKey;
   const [activeMemberId, setActiveMemberId] = useState('all');
+  const [pendingTaskKey, setPendingTaskKey] = useState(null);
+  const [deletingEventId, setDeletingEventId] = useState(null);
   const dayEvents = events.filter((event) => eventOccursOnDate(event, resolvedDateKey));
   const filteredEvents = dayEvents.filter((event) => activeMemberId === 'all' || event.assignedMemberIds.includes(activeMemberId));
   const dateLabel = formatDateLabel(resolvedDateKey);
+
+  const handleToggleTask = async (eventId) => {
+    const key = `${eventId}:${resolvedDateKey}`;
+    setPendingTaskKey(key);
+    const { error } = await toggleTaskCompletion(eventId, resolvedDateKey);
+    setPendingTaskKey((current) => (current === key ? null : current));
+    if (error) toast.error(error);
+  };
+
+  const handleDeleteEvent = async (event) => {
+    if (!window.confirm(`Delete "${event.title}"?`)) return;
+    setDeletingEventId(event.id);
+    const { error } = await deleteEvent(event.id);
+    setDeletingEventId(null);
+    if (error) {
+      toast.error(error);
+    } else {
+      toast.success(`"${event.title}" was deleted.`);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -680,9 +714,10 @@ function DayPage() {
                       {event.isTask && (
                         <button
                           type="button"
-                          onClick={() => toggleTaskCompletion(event.id, resolvedDateKey)}
+                          onClick={() => handleToggleTask(event.id)}
+                          disabled={pendingTaskKey === `${event.id}:${resolvedDateKey}`}
                           aria-label={isComplete ? 'Mark as not done' : 'Mark as done'}
-                          className={`mt-1 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full border-2 text-xs font-bold transition ${isComplete ? 'border-teal-600 bg-teal-600 text-white' : 'border-slate-300 text-transparent hover:border-teal-500'}`}
+                          className={`mt-1 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full border-2 text-xs font-bold transition disabled:opacity-50 ${isComplete ? 'border-teal-600 bg-teal-600 text-white' : 'border-slate-300 text-transparent hover:border-teal-500'}`}
                         >
                           ✓
                         </button>
@@ -699,14 +734,11 @@ function DayPage() {
                       <Link to={`/event/${event.id}/edit`} className="rounded-full border border-slate-200 px-3 py-1 text-sm font-medium">Edit</Link>
                       <button
                         type="button"
-                        onClick={() => {
-                          if (window.confirm(`Delete \"${event.title}\"?`)) {
-                            deleteEvent(event.id);
-                          }
-                        }}
-                        className="rounded-full border border-rose-200 px-3 py-1 text-sm font-medium text-rose-600"
+                        onClick={() => handleDeleteEvent(event)}
+                        disabled={deletingEventId === event.id}
+                        className="rounded-full border border-rose-200 px-3 py-1 text-sm font-medium text-rose-600 disabled:opacity-50"
                       >
-                        Delete
+                        {deletingEventId === event.id ? 'Deleting…' : 'Delete'}
                       </button>
                     </div>
                   </div>
@@ -736,10 +768,13 @@ function DayPage() {
 function EventFormPage() {
   const { eventId } = useParams();
   const { events, members, addEvent, updateEvent } = useApp();
+  const toast = useToast();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const existingEvent = events.find((event) => event.id === eventId);
   const initialDate = searchParams.get('date') || existingEvent?.date || '';
+  const [formError, setFormError] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const [form, setForm] = useState({
     title: existingEvent?.title || '',
@@ -780,9 +815,35 @@ function EventFormPage() {
     }));
   };
 
-  const handleSubmit = (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault();
-    if (!form.title.trim() || !form.date) return;
+    setFormError('');
+
+    if (!form.title.trim()) {
+      setFormError('Please enter a title for this event.');
+      return;
+    }
+    if (!form.date) {
+      setFormError('Please choose a date for this event.');
+      return;
+    }
+    if (!form.allDay && form.startTime && form.endTime && form.endTime <= form.startTime) {
+      setFormError('End time must be after the start time.');
+      return;
+    }
+    const recurrenceInterval = Number(form.recurrenceInterval);
+    if (form.recurrenceFreq !== 'none' && (!Number.isFinite(recurrenceInterval) || recurrenceInterval < 1)) {
+      setFormError('Repeat interval must be at least 1.');
+      return;
+    }
+    if (form.recurrenceFreq === 'weekly' && form.recurrenceDaysOfWeek.length === 0) {
+      setFormError('Pick at least one day of the week for a weekly repeat.');
+      return;
+    }
+    if (form.recurrenceFreq !== 'none' && form.recurrenceEndDate && form.recurrenceEndDate < form.date) {
+      setFormError('The repeat end date must be on or after the event date.');
+      return;
+    }
 
     const payload = {
       title: form.title.trim(),
@@ -795,17 +856,21 @@ function EventFormPage() {
       assignedMemberIds: form.assignedMemberIds,
       isTask: form.isTask,
       recurrenceFreq: form.recurrenceFreq,
-      recurrenceInterval: Number(form.recurrenceInterval) || 1,
+      recurrenceInterval: recurrenceInterval || 1,
       recurrenceDaysOfWeek: form.recurrenceFreq === 'weekly' ? form.recurrenceDaysOfWeek : [],
       recurrenceEndDate: form.recurrenceEndDate || null
     };
 
-    if (existingEvent) {
-      updateEvent(existingEvent.id, payload);
-    } else {
-      addEvent(payload);
+    setSaving(true);
+    const { error } = existingEvent ? await updateEvent(existingEvent.id, payload) : await addEvent(payload);
+    setSaving(false);
+
+    if (error) {
+      toast.error(error);
+      return;
     }
 
+    toast.success(existingEvent ? 'Event updated.' : 'Event created.');
     navigate(`/day/${form.date}`);
   };
 
@@ -917,12 +982,14 @@ function EventFormPage() {
           )}
         </div>
 
+        {formError && <p className="rounded-2xl bg-red-50 px-3 py-2 text-sm font-medium text-red-700">{formError}</p>}
+
         <div className="flex items-center justify-between gap-3 pt-2">
           <button type="button" onClick={() => navigate(-1)} className="rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600">
             Cancel
           </button>
-          <button type="submit" className="rounded-full bg-teal-600 px-4 py-2 text-sm font-semibold text-white">
-            Save event
+          <button type="submit" disabled={saving} className="rounded-full bg-teal-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60">
+            {saving ? 'Saving…' : 'Save event'}
           </button>
         </div>
       </form>
@@ -932,14 +999,51 @@ function EventFormPage() {
 
 function MembersPage() {
   const { members, addMember, removeMember, accountHolders, linkMemberToAccount } = useApp();
+  const toast = useToast();
   const [name, setName] = useState('');
   const [color, setColor] = useState('#3b82f6');
+  const [adding, setAdding] = useState(false);
+  const [removingId, setRemovingId] = useState(null);
+  const [linkingId, setLinkingId] = useState(null);
 
-  const handleSubmit = (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault();
-    if (!name.trim()) return;
-    addMember(name.trim(), color);
+    const trimmed = name.trim();
+    if (!trimmed) {
+      toast.error('Please enter a name for the family member.');
+      return;
+    }
+
+    setAdding(true);
+    const { error } = await addMember(trimmed, color);
+    setAdding(false);
+
+    if (error) {
+      toast.error(error);
+      return;
+    }
+
+    toast.success(`${trimmed} was added to your family.`);
     setName('');
+  };
+
+  const handleRemove = async (member) => {
+    if (!window.confirm(`Remove ${member.name} from your family?`)) return;
+    setRemovingId(member.id);
+    const { error } = await removeMember(member.id);
+    setRemovingId(null);
+    if (error) {
+      toast.error(error);
+    } else {
+      toast.success(`${member.name} was removed.`);
+    }
+  };
+
+  const handleLinkChange = async (memberId, accountUserId) => {
+    setLinkingId(memberId);
+    const { error } = await linkMemberToAccount(memberId, accountUserId);
+    setLinkingId(null);
+    if (error) toast.error(error);
   };
 
   const accountLabel = (userId) => {
@@ -956,6 +1060,11 @@ function MembersPage() {
             <h2 className="text-xl font-semibold">Manage your family roster</h2>
           </div>
         </div>
+        {members.length === 0 ? (
+          <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-600">
+            No family members yet. Add your first one using the form.
+          </div>
+        ) : (
         <div className="space-y-3">
           {members.map((member) => (
             <div key={member.id} className="rounded-2xl border border-slate-200 p-3">
@@ -967,8 +1076,8 @@ function MembersPage() {
                     <p className="text-sm text-slate-500">{member.role}</p>
                   </div>
                 </div>
-                <button onClick={() => removeMember(member.id)} className="text-sm font-semibold text-red-600">
-                  Remove
+                <button onClick={() => handleRemove(member)} disabled={removingId === member.id} className="text-sm font-semibold text-red-600 disabled:opacity-50">
+                  {removingId === member.id ? 'Removing…' : 'Remove'}
                 </button>
               </div>
               {hasSupabaseConfig && (
@@ -977,8 +1086,9 @@ function MembersPage() {
                     Linked account (for notifications)
                     <select
                       value={member.user_id || ''}
-                      onChange={(event) => linkMemberToAccount(member.id, event.target.value || null)}
-                      className="mt-1 w-full rounded-xl border border-slate-200 px-2 py-1.5 text-sm"
+                      onChange={(event) => handleLinkChange(member.id, event.target.value || null)}
+                      disabled={linkingId === member.id}
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-2 py-1.5 text-sm disabled:opacity-50"
                     >
                       <option value="">Not linked</option>
                       {accountHolders.map((holder) => (
@@ -996,6 +1106,7 @@ function MembersPage() {
             </div>
           ))}
         </div>
+        )}
       </div>
 
       <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -1009,8 +1120,8 @@ function MembersPage() {
             Color
             <input type="color" value={color} onChange={(event) => setColor(event.target.value)} className="mt-2 h-12 w-full rounded-2xl border border-slate-200" />
           </label>
-          <button type="submit" className="w-full rounded-2xl bg-teal-600 px-4 py-3 font-semibold text-white">
-            Add member
+          <button type="submit" disabled={adding} className="w-full rounded-2xl bg-teal-600 px-4 py-3 font-semibold text-white disabled:opacity-60">
+            {adding ? 'Adding…' : 'Add member'}
           </button>
         </form>
       </div>
@@ -1020,8 +1131,10 @@ function MembersPage() {
 
 function SettingsPage() {
   const { family, user, leaveFamily } = useApp();
+  const toast = useToast();
   const navigate = useNavigate();
   const [copied, setCopied] = useState(false);
+  const [leaving, setLeaving] = useState(false);
 
   const handleCopy = async () => {
     if (!family?.inviteCode) return;
@@ -1030,13 +1143,19 @@ function SettingsPage() {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Clipboard API may be unavailable; ignore silently.
+      toast.error('Could not copy the invite code. Please copy it manually.');
     }
   };
 
   const handleLeave = async () => {
     if (!window.confirm('Leave this family calendar? You can rejoin later with the invite code.')) return;
-    await leaveFamily();
+    setLeaving(true);
+    const { error } = await leaveFamily();
+    setLeaving(false);
+    if (error) {
+      toast.error(error);
+      return;
+    }
     navigate('/onboarding');
   };
 
@@ -1075,8 +1194,8 @@ function SettingsPage() {
       <div className="mt-6 rounded-2xl border border-red-200 bg-red-50 p-4">
         <p className="text-sm font-semibold text-red-900">Leave family</p>
         <p className="mt-1 text-sm text-red-700">You'll lose access to this family's calendar until you rejoin with the invite code.</p>
-        <button onClick={handleLeave} className="mt-3 rounded-2xl border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-700">
-          Leave this family
+        <button onClick={handleLeave} disabled={leaving} className="mt-3 rounded-2xl border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-700 disabled:opacity-60">
+          {leaving ? 'Leaving…' : 'Leave this family'}
         </button>
       </div>
     </div>

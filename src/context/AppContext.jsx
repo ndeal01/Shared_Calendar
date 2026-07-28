@@ -456,15 +456,17 @@ export function AppProvider({ children }) {
   const leaveFamily = async () => {
     if (hasSupabaseConfig && supabase && user?.id && family?.id) {
       try {
-        await supabase.from('family_users').delete().eq('family_id', family.id).eq('user_id', user.id);
+        const { error } = await supabase.from('family_users').delete().eq('family_id', family.id).eq('user_id', user.id);
+        if (error) return { error };
       } catch (e) {
-        console.warn('Unable to leave family', e);
+        return { error: e };
       }
     }
 
     setFamily(null);
     setMembers([]);
     setEvents([]);
+    return { error: null };
   };
 
   // --- Event actions ---
@@ -483,7 +485,7 @@ export function AppProvider({ children }) {
 
     if (hasSupabaseConfig && supabase && family?.id) {
       try {
-        await supabase.from('events').insert([{
+        const { error: insertError } = await supabase.from('events').insert([{
           id: newEvent.id,
           family_id: family.id,
           title: newEvent.title,
@@ -500,26 +502,29 @@ export function AppProvider({ children }) {
           recurrence_end_date: newEvent.recurrenceEndDate || null
         }]);
 
+        if (insertError) return { error: insertError };
+
         if (newEvent.assignedMemberIds.length > 0) {
           const rows = newEvent.assignedMemberIds.map((memberId) => ({ event_id: newEvent.id, member_id: memberId }));
-          await supabase.from('event_assignments').insert(rows);
+          const { error: assignError } = await supabase.from('event_assignments').insert(rows);
+          if (assignError) return { error: assignError };
         }
 
         setEvents((current) => [newEvent, ...current]);
-        return newEvent;
+        return { event: newEvent, error: null };
       } catch (e) {
-        console.warn('Supabase addEvent failed', e);
+        return { error: e };
       }
     }
 
     setEvents((current) => [newEvent, ...current]);
-    return newEvent;
+    return { event: newEvent, error: null };
   };
 
   const updateEvent = async (eventId, updates) => {
     if (hasSupabaseConfig && supabase && family?.id) {
       try {
-        await supabase.from('events').update({
+        const { error: updateError } = await supabase.from('events').update({
           title: updates.title,
           date: updates.date,
           start_time: updates.startTime || null,
@@ -534,31 +539,39 @@ export function AppProvider({ children }) {
           recurrence_end_date: updates.recurrenceEndDate || null
         }).eq('id', eventId);
 
+        if (updateError) return { error: updateError };
+
         if (Array.isArray(updates.assignedMemberIds)) {
           // Replace assignments: delete existing, insert new
           await supabase.from('event_assignments').delete().eq('event_id', eventId);
           const rows = updates.assignedMemberIds.map((memberId) => ({ event_id: eventId, member_id: memberId }));
-          if (rows.length) await supabase.from('event_assignments').insert(rows);
+          if (rows.length) {
+            const { error: assignError } = await supabase.from('event_assignments').insert(rows);
+            if (assignError) return { error: assignError };
+          }
         }
       } catch (e) {
-        console.warn('Supabase updateEvent failed', e);
+        return { error: e };
       }
     }
 
     setEvents((current) => current.map((event) => (event.id === eventId ? { ...event, ...updates } : event)));
+    return { error: null };
   };
 
   const deleteEvent = async (eventId) => {
     if (hasSupabaseConfig && supabase && family?.id) {
       try {
         await supabase.from('event_assignments').delete().eq('event_id', eventId);
-        await supabase.from('events').delete().eq('id', eventId);
+        const { error } = await supabase.from('events').delete().eq('id', eventId);
+        if (error) return { error };
       } catch (e) {
-        console.warn('Supabase deleteEvent failed', e);
+        return { error: e };
       }
     }
 
     setEvents((current) => current.filter((event) => event.id !== eventId));
+    return { error: null };
   };
 
   const addMember = async (name, color, role = 'member') => {
@@ -579,31 +592,33 @@ export function AppProvider({ children }) {
           role: member.role
         }]).select().single();
 
-        if (!error && data) {
-          setMembers((current) => [...current, data]);
-          return data;
-        }
+        if (error) return { error };
+
+        setMembers((current) => [...current, data]);
+        return { member: data, error: null };
       } catch (e) {
-        console.warn('Supabase addMember failed', e);
+        return { error: e };
       }
     }
 
     setMembers((current) => [...current, member]);
-    return member;
+    return { member, error: null };
   };
 
   const removeMember = async (memberId) => {
     if (hasSupabaseConfig && supabase && family?.id) {
       try {
         await supabase.from('event_assignments').delete().eq('member_id', memberId);
-        await supabase.from('members').delete().eq('id', memberId);
+        const { error } = await supabase.from('members').delete().eq('id', memberId);
+        if (error) return { error };
       } catch (e) {
-        console.warn('Supabase removeMember failed', e);
+        return { error: e };
       }
     }
 
     setMembers((current) => current.filter((member) => member.id !== memberId));
     setEvents((current) => current.map((event) => ({ ...event, assignedMemberIds: event.assignedMemberIds.filter((id) => id !== memberId) })));
+    return { error: null };
   };
 
   // Link a member profile to one of the real account holders already in this
@@ -632,21 +647,24 @@ export function AppProvider({ children }) {
     if (alreadyComplete) {
       if (hasSupabaseConfig && supabase) {
         try {
-          await supabase.from('event_completions').delete().eq('event_id', eventId).eq('occurrence_date', occurrenceDateKey);
+          const { error } = await supabase.from('event_completions').delete().eq('event_id', eventId).eq('occurrence_date', occurrenceDateKey);
+          if (error) return { error };
         } catch (e) {
-          console.warn('Supabase uncomplete task failed', e);
+          return { error: e };
         }
       }
       setCompletions((current) => current.filter((c) => !(c.event_id === eventId && c.occurrence_date === occurrenceDateKey)));
-      return;
+      return { error: null };
     }
 
     const newCompletion = { event_id: eventId, occurrence_date: occurrenceDateKey, completed_by: user?.id || null, completed_at: new Date().toISOString() };
-    setCompletions((current) => [...current, newCompletion]);
 
     if (hasSupabaseConfig && supabase && family?.id) {
       try {
-        await supabase.from('event_completions').insert([newCompletion]);
+        const { error: insertError } = await supabase.from('event_completions').insert([newCompletion]);
+        if (insertError) return { error: insertError };
+
+        setCompletions((current) => [...current, newCompletion]);
 
         // Notify every assigned member who has a linked account (other than
         // whoever just completed the task).
@@ -667,32 +685,41 @@ export function AppProvider({ children }) {
           }));
           await supabase.from('notifications').insert(notificationRows);
         }
+
+        return { error: null };
       } catch (e) {
-        console.warn('Supabase completeTask failed', e);
+        return { error: e };
       }
     }
+
+    setCompletions((current) => [...current, newCompletion]);
+    return { error: null };
   };
 
   const markNotificationRead = async (notificationId) => {
     setNotifications((current) => current.map((n) => (n.id === notificationId ? { ...n, read: true } : n)));
     if (hasSupabaseConfig && supabase) {
       try {
-        await supabase.from('notifications').update({ read: true }).eq('id', notificationId);
+        const { error } = await supabase.from('notifications').update({ read: true }).eq('id', notificationId);
+        if (error) return { error };
       } catch (e) {
-        console.warn('Supabase markNotificationRead failed', e);
+        return { error: e };
       }
     }
+    return { error: null };
   };
 
   const markAllNotificationsRead = async () => {
     setNotifications((current) => current.map((n) => ({ ...n, read: true })));
     if (hasSupabaseConfig && supabase && user?.id) {
       try {
-        await supabase.from('notifications').update({ read: true }).eq('user_id', user.id).eq('read', false);
+        const { error } = await supabase.from('notifications').update({ read: true }).eq('user_id', user.id).eq('read', false);
+        if (error) return { error };
       } catch (e) {
-        console.warn('Supabase markAllNotificationsRead failed', e);
+        return { error: e };
       }
     }
+    return { error: null };
   };
 
   const value = useMemo(
